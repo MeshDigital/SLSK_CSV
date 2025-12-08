@@ -133,97 +133,10 @@ class AioSlskAdapter:
             logger.info(f"Settings available: {Settings is not None}, CredentialsSettings available: {CredentialsSettings is not None}")
 
             if prefers_settings:
-                logger.info("Building Settings-based SoulSeekClient (preferred for this aioslsk build)")
-                try:
-                    # Per API docs, Settings should only contain credentials.
-                    creds = CredentialsSettings(username=self.config.username, password=self._password) # type: ignore
-                    settings_obj = Settings(credentials=creds) # type: ignore
-
-                    # Pass listen_port and use_upnp to the client constructor directly.
-                    client_kwargs = {
-                        'listen_port': self.config.listen_port,
-                        'use_upnp': self.config.use_upnp
-                    }
-
-                    try:
-                        self._client = SoulSeekClient(settings_obj, **client_kwargs) # type: ignore
-                    except TypeError:
-                        self._client = SoulSeekClient(settings=settings_obj, **client_kwargs) # type: ignore
-
-                    # Register event listeners BEFORE connecting to ensure we catch connection events.
-                    if not self._event_listeners_registered:
-                        self._register_event_listeners()
-
-                    # The correct sequence is to connect first, then log in.
-                    # Some versions use `start()` as the connection method.
-                    if hasattr(self._client, 'start'):
-                        start_fn = getattr(self._client, 'start')
-                        if inspect.iscoroutinefunction(start_fn):
-                            await start_fn()
-                        else:
-                            start_fn()
-                    elif hasattr(self._client, 'connect'):
-                        # Fallback to 'connect' if 'start' is not present
-                        connect_fn = getattr(self._client, 'connect')
-                        if inspect.iscoroutinefunction(connect_fn):
-                            await connect_fn()
-                        else:
-                            connect_fn()
-
-                    if hasattr(self._client, 'login'):
-                        login_fn = getattr(self._client, 'login')
-                        if inspect.iscoroutinefunction(login_fn):
-                            logger.debug("Calling await client.login()")
-                            await login_fn()
-                        else:
-                            login_fn()
-                except Exception as e:
-                    logger.error("Settings-based SoulSeekClient construction failed: %s", e)
-                    logger.error(traceback.format_exc())
-                    raise
+                await self._connect_with_settings()
             else:
-                # Fallback: try username/password constructor, then no-arg + login
-                try:
-                    logger.debug("Attempting to instantiate SoulSeekClient with username/password.")
-                    self._client = SoulSeekClient(username=self.config.username, password=self._password)
-                    if hasattr(self._client, 'connect'):
-                        connect_fn = getattr(self._client, 'connect')
-                        if inspect.iscoroutinefunction(connect_fn):
-                            await connect_fn()
-                        else:
-                            connect_fn()
-                except TypeError as te:
-                    logger.info("SoulSeekClient constructor rejected username/password, trying alternate flows: %s", te)
-                    logger.debug("Attempting to instantiate SoulSeekClient with no arguments.")
-                    try:
-                        self._client = SoulSeekClient()
-                    except Exception as e:
-                        logger.debug("No-arg instantiation failed: %s", e)
-                        logger.debug(traceback.format_exc())
-                        raise
+                await self._connect_with_fallback()
 
-                    if hasattr(self._client, 'connect'):
-                        connect_fn = getattr(self._client, 'connect')
-                        try:
-                            if inspect.iscoroutinefunction(connect_fn):
-                                await connect_fn()
-                            else:
-                                connect_fn()
-                        except Exception as e:
-                            logger.warning("connect() call failed: %s", e)
-
-                    if hasattr(self._client, 'login'):
-                        login_fn = getattr(self._client, 'login')
-                        try:
-                            if inspect.iscoroutinefunction(login_fn):
-                                await login_fn(self.config.username, self._password)
-                            else:
-                                login_fn(self.config.username, self._password)
-                        except TypeError:
-                            if inspect.iscoroutinefunction(login_fn):
-                                await login_fn()
-                            else:
-                                login_fn()
         elif self.config.aioslsk_mode == "github":
             # This mode is now handled by the 'prefers_settings' logic in pypi mode.
             # If a specific github-only flow is needed, it can be re-added,
@@ -232,6 +145,133 @@ class AioSlskAdapter:
         else:
             raise ValueError(f"Unknown aioslsk_mode: {self.config.aioslsk_mode}")
         logger.info("Connected to Soulseek.")
+
+    async def _connect_with_settings(self):
+        """Connection strategy using the modern Settings-based API."""
+        logger.info("Building Settings-based SoulSeekClient (preferred for this aioslsk build)")
+        try:
+            # Match the successful test script's initialization logic
+            settings_obj = Settings(
+                credentials=CredentialsSettings(username=self.config.username, password=self._password),
+                listen_port=self.config.listen_port,
+                use_upnp=self.config.use_upnp
+            )
+            
+            # Use the simpler constructor that just takes the settings object,
+            # which is more common in recent versions.
+            self._client = SoulSeekClient(settings_obj)
+
+            if not self._event_listeners_registered:
+                self._register_event_listeners()
+
+            await self._perform_login_sequence()
+            logger.info("Successfully connected and logged in via Settings-based client.")
+
+        except Exception as e:
+            logger.error("Settings-based SoulSeekClient connection failed: %s", e)
+            logger.error(traceback.format_exc())
+            raise
+
+    async def _connect_with_fallback(self):
+        """Connection strategy using older username/password or no-arg constructors."""
+        logger.info("Attempting fallback connection methods.")
+        # Strategy 1: username/password constructor
+        try:
+            logger.debug("Trying username/password constructor.")
+            self._client = SoulSeekClient(username=self.config.username, password=self._password)
+            if hasattr(self._client, 'connect'):
+                connect_fn = getattr(self._client, 'connect')
+                if inspect.iscoroutinefunction(connect_fn):
+                    await connect_fn()
+                else:
+                    connect_fn()
+                logger.info("Successfully connected via username/password client.")
+                return
+        except Exception as e:
+            logger.warning("Username/password client instantiation or connect failed: %s", e)
+            logger.debug(traceback.format_exc())
+
+        # Strategy 2: no-arg constructor + login with arguments
+        try:
+            logger.debug("Trying no-arg constructor and login(user, pass).")
+            self._client = SoulSeekClient()
+            await self._perform_login_sequence(with_creds=True)
+            logger.info("Successfully connected and logged in via fallback client.")
+            return
+        except Exception as e:
+            logger.error(f"Failed during fallback connect/login process: {e}")
+            logger.error(traceback.format_exc())
+            raise
+
+    async def _perform_login_sequence(self, with_creds: bool = False):
+        """Handles the start/connect and login calls, which vary between versions."""
+        if not self._client:
+            raise RuntimeError("Client not initialized before login sequence.")
+
+        async def sequence():
+            # Step 1: Start the connection (start() or connect())
+            # Prioritize client.start() as it's the modern API's entry point.
+            # Some versions have both .start() and .connect(), and .start() is the correct one to use.
+            if hasattr(self._client, 'start'):
+                start_fn = getattr(self._client, 'start')
+                logger.debug("Found client.start() method.")
+                if inspect.iscoroutinefunction(start_fn):
+                    logger.debug("Calling await client.start()")
+                    await start_fn()
+                else:
+                    logger.debug("Calling client.start()")
+                    start_fn()
+                logger.debug("client.start() completed.")
+            elif hasattr(self._client, 'connect'):
+                # Fallback for older versions that only have .connect()
+                connect_fn = getattr(self._client, 'connect')
+                logger.debug("Found client.connect() method.")
+                if inspect.iscoroutinefunction(connect_fn):
+                    logger.debug("Calling await client.connect()")
+                    await connect_fn()
+                else:
+                    logger.debug("Calling client.connect()")
+                    connect_fn()
+                logger.debug("client.connect() completed.")
+            else:
+                logger.warning("No .start() or .connect() method found on the client.")
+
+            # Step 2: Perform login
+            if hasattr(self._client, 'login'):
+                login_fn = getattr(self._client, 'login')
+                logger.debug("Found client.login() method.")
+                if inspect.iscoroutinefunction(login_fn):
+                    if with_creds:
+                        logger.debug("Calling await client.login(username, password)")
+                        await login_fn(self.config.username, self._password)
+                    else:
+                        logger.debug("Calling await client.login()")
+                        await login_fn()
+                else:
+                    if with_creds:
+                        logger.debug("Calling client.login(username, password)")
+                        login_fn(self.config.username, self._password)
+                    else:
+                        logger.debug("Calling client.login()")
+                        login_fn()
+                logger.debug("client.login() completed.")
+
+        try:
+            logger.info(f"Attempting connection with a {self.config.connect_timeout} second timeout...")
+            await asyncio.wait_for(sequence(), timeout=self.config.connect_timeout)
+            logger.info("✅ Connection and login sequence completed successfully.")
+        except asyncio.TimeoutError:
+            logger.error("❌ Connection timed out! The server is not responding or login is taking too long.")
+            logger.error("POSSIBLE FIXES:")
+            logger.error("1. Check if Windows Firewall or another firewall is blocking 'python.exe'.")
+            logger.error("2. Verify your internet connection and that the Soulseek server is online.")
+            logger.error("3. Try increasing the 'connect_timeout' value in your config.ini file.")
+            raise
+        except Exception as e:
+            logger.error(f"❌ LOGIN/CONNECTION ERROR: {e}")
+            logger.error(traceback.format_exc())
+            raise
+
 
     async def disconnect(self) -> None:
         """Disconnects from the Soulseek network."""
