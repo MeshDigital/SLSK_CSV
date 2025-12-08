@@ -1,6 +1,7 @@
 import configparser
 from pathlib import Path
 import logging
+from datetime import timedelta
 from dataclasses import dataclass, asdict
 from typing import Literal
 
@@ -17,6 +18,11 @@ class Config:
     aioslsk_mode: Literal["pypi", "github"] = "pypi"
     db_path: Path = Path("jobs.db")
     filename_template: str = "{artist} - {title}.{ext}"
+    listen_port: int = 2234
+    use_upnp: bool = True
+    connect_timeout: int = 10
+    max_retries: int = 3
+    max_transfers: int = 5
     username: str = "" # Stored here for convenience, but keyring is preferred
     password: str = "" # Optional fallback storage (insecure); keyring is preferred
 
@@ -36,11 +42,16 @@ def load_config(config_file: Path = DEFAULT_CONFIG_FILE) -> Config:
 
         if "Settings" in cfg_parser:
             settings = cfg_parser["Settings"]
-            config_obj.download_dir = Path(settings.get("download_dir", str(config_obj.download_dir)))
+            config_obj.download_dir = Path(settings.get("download_dir", config_obj.download_dir))
             config_obj.concurrency = settings.getint("concurrency", config_obj.concurrency)
-            config_obj.aioslsk_mode = settings.get("aioslsk_mode", config_obj.aioslsk_mode) # type: ignore
-            config_obj.db_path = Path(settings.get("db_path", str(config_obj.db_path)))
+            config_obj.aioslsk_mode = settings.get("aioslsk_mode", config_obj.aioslsk_mode)  # type: ignore
+            config_obj.db_path = Path(settings.get("db_path", config_obj.db_path))
             config_obj.filename_template = settings.get("filename_template", config_obj.filename_template)
+            config_obj.listen_port = settings.getint("listen_port", config_obj.listen_port)
+            config_obj.use_upnp = settings.getboolean("use_upnp", config_obj.use_upnp)
+            config_obj.connect_timeout = settings.getint("connect_timeout", config_obj.connect_timeout)
+            config_obj.max_retries = settings.getint("max_retries", config_obj.max_retries)
+            config_obj.max_transfers = settings.getint("max_transfers", config_obj.max_transfers)
         
         if "Credentials" in cfg_parser:
             credentials = cfg_parser["Credentials"]
@@ -62,6 +73,11 @@ def save_config(config_obj: Config, config_file: Path = DEFAULT_CONFIG_FILE):
         "aioslsk_mode": config_obj.aioslsk_mode,
         "db_path": str(config_obj.db_path),
         "filename_template": config_obj.filename_template,
+        "listen_port": str(config_obj.listen_port),
+        "use_upnp": str(config_obj.use_upnp),
+        "connect_timeout": str(config_obj.connect_timeout),
+        "max_retries": str(config_obj.max_retries),
+        "max_transfers": str(config_obj.max_transfers),
     }
     # Only write password if explicitly set (user opted to fallback to config)
     creds = {"username": config_obj.username}

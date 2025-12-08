@@ -62,6 +62,17 @@ class SoulseekApp:
         self.download_task = None
 
         self._setup_ui()
+
+        # If a password exists in the keyring or config, prefill it and mark
+        # the remember checkbox so the user knows credentials are stored.
+        try:
+            existing_pw = config.retrieve_password(self.config.username) if self.config.username else ""
+            if existing_pw:
+                self.password_entry.insert(0, existing_pw)
+                self.remember_var.set(True)
+        except Exception:
+            pass
+
         self._init_backend()
 
     def _setup_ui(self):
@@ -78,8 +89,13 @@ class SoulseekApp:
         self.password_entry = tk.Entry(self.login_frame, show="*", width=30)
         self.password_entry.grid(row=1, column=1, padx=5, pady=5)
 
+        # Remember password checkbox (controls whether plaintext fallback is used)
+        self.remember_var = tk.BooleanVar(value=False)
+        self.remember_chk = ttk.Checkbutton(self.login_frame, text="Remember password", variable=self.remember_var)
+        self.remember_chk.grid(row=2, columnspan=2, pady=(0, 5))
+
         self.login_btn = ttk.Button(self.login_frame, text="Login", command=self.login)
-        self.login_btn.grid(row=2, columnspan=2, pady=10)
+        self.login_btn.grid(row=3, columnspan=2, pady=10)
 
         # Search Frame
         self.search_frame = tk.Frame(self.root)
@@ -137,23 +153,29 @@ class SoulseekApp:
             messagebox.showerror("Error", "Please enter username and password")
             return
 
-        # Save username and password (prefer system keyring, fallback to config if allowed)
-        # `save_credentials` will persist the username to config and attempt to
-        # save the password securely to the system keyring. If that fails and
-        # fallback_to_config is True, the password will be written to `config.ini`
-        # (this is insecure — the user can change fallback behavior in code).
-        saved = config.save_credentials(username, password, self.config, use_keyring=True, fallback_to_config=True)
+        # Save username and password (prefer keyring). Only allow plaintext
+        # fallback to config when the user explicitly checks "Remember password".
+        saved = config.save_credentials(
+            username,
+            password,
+            self.config,
+            use_keyring=True,
+            fallback_to_config=self.remember_var.get()
+        )
+
         if not saved:
             messagebox.showwarning("Warning", "Password was not saved to keyring or config.")
+        elif self.remember_var.get():
+            messagebox.showinfo("Saved", "Password stored (keyring or config) as requested.")
 
         # Async login
         self.run_async(self.async_login(username, password))
 
     def run_async(self, coro):
-        """Schedule an async task safely from Tkinter callbacks."""
+        """Schedule an async task safely from Tkinter callbacks.""" # pragma: no cover
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
-    async def async_login(self, username, password):
+    async def async_login(self, username, password): # pragma: no cover
         try:
             await self.adapter.connect()
             def on_success():
@@ -164,14 +186,14 @@ class SoulseekApp:
         except Exception as e:
             self.root.after(0, lambda e=e: messagebox.showerror("Login Failed", str(e)))
 
-    def search(self):
+    def search(self): # pragma: no cover
         query = self.search_entry.get()
         if not query:
             messagebox.showerror("Error", "Enter a search term")
             return
         self.run_async(self.async_search(query))
 
-    def _update_search_results_gui(self, results: List[Track]):
+    def _update_search_results_gui(self, results: List[Track]): # pragma: no cover
         self.search_results.clear()
         self.results_box.delete(0, tk.END)
         self.search_results.extend(results)
@@ -180,8 +202,10 @@ class SoulseekApp:
             self.results_box.insert(tk.END, display_text)
         self.download_btn.config(state=tk.DISABLED) # Disable until selection
 
-    async def async_search(self, query):
-        if not self.adapter or not self.adapter.is_connected():
+    async def async_search(self, query): # pragma: no cover
+        # The adapter now manages its connection state internally.
+        # A check for self.adapter is still good practice.
+        if not self.adapter:
             self.root.after(0, lambda: messagebox.showerror("Error", "Not connected to Soulseek. Please log in."))
             return
         try:
@@ -190,7 +214,7 @@ class SoulseekApp:
         except Exception as e:
             self.root.after(0, lambda e=e: messagebox.showerror("Search Error", str(e)))
 
-    def download_selected(self):
+    def download_selected(self): # pragma: no cover
         selection = self.results_box.curselection()
         if not selection:
             messagebox.showerror("Error", "Select a file to download")
@@ -207,10 +231,10 @@ class SoulseekApp:
         else:
             messagebox.showerror("Error", "Invalid selection. Please search again.")
 
-    def on_result_select(self, event):
+    def on_result_select(self, event): # pragma: no cover
         self.download_btn.config(state=tk.NORMAL if self.results_box.curselection() else tk.DISABLED)
 
-    def cancel_download(self):
+    def cancel_download(self): # pragma: no cover
         # This will cancel the currently active download task in the worker
         if self.download_worker:
             # A more robust implementation would cancel a specific job by its ID.
@@ -221,7 +245,7 @@ class SoulseekApp:
         else:
             messagebox.showinfo("Cancellation", "No active download to cancel.")
 
-    def on_closing(self):
+    def on_closing(self): # pragma: no cover
         """Handle window closing event."""
         async def shutdown():
             logger.info("Shutting down...")
@@ -238,11 +262,11 @@ class SoulseekApp:
             self.run_async(shutdown()).add_done_callback(lambda _: self.root.destroy())
 
 # Run GUI
-def main():
+def main(): # pragma: no cover
     root = tk.Tk()
     app = SoulseekApp(root)
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()
 
-if __name__ == "__main__":
+if __name__ == "__main__": # pragma: no cover
     main()

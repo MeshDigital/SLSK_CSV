@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import logging
+from dataclasses import asdict
 from datetime import datetime
 from typing import Optional, List
 
@@ -38,7 +39,12 @@ class JobQueue:
                 attempts INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                result_path TEXT
+                result_path TEXT,
+                transfer_id TEXT,
+                partial_path TEXT,
+                bytes_downloaded INTEGER DEFAULT 0,
+                total_bytes INTEGER,
+                retry_at TEXT
             )
         """)
         conn.commit()
@@ -52,7 +58,12 @@ class JobQueue:
             job.attempts,
             job.created_at.isoformat(),
             job.updated_at.isoformat(),
-            job.result_path
+            job.result_path,
+            job.transfer_id,
+            job.partial_path,
+            job.bytes_downloaded,
+            job.total_bytes,
+            job.retry_at.isoformat() if job.retry_at else None
         )
 
     def _row_to_job(self, row: sqlite3.Row) -> Job:
@@ -66,7 +77,12 @@ class JobQueue:
             attempts=row["attempts"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
-            result_path=row["result_path"]
+            result_path=row["result_path"],
+            transfer_id=row["transfer_id"],
+            partial_path=row["partial_path"],
+            bytes_downloaded=row["bytes_downloaded"],
+            total_bytes=row["total_bytes"],
+            retry_at=datetime.fromisoformat(row["retry_at"]) if row["retry_at"] else None
         )
 
     def enqueue(self, track: Track, status: str = "PENDING") -> int:
@@ -77,10 +93,14 @@ class JobQueue:
         conn = self._get_conn()
         cursor = conn.cursor()
         now = datetime.now()
-        job = Job(id=None, track=track, status=status, attempts=0, created_at=now, updated_at=now, result_path=None)
+        job = Job(id=None, track=track, status=status, attempts=0, created_at=now, updated_at=now,
+                  result_path=None, transfer_id=None, partial_path=None, bytes_downloaded=0, total_bytes=None, retry_at=None)
         cursor.execute(
-            """INSERT INTO jobs (track_json, status, attempts, created_at, updated_at, result_path)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO jobs (
+                   track_json, status, attempts, created_at, updated_at, result_path,
+                   transfer_id, partial_path, bytes_downloaded, total_bytes, retry_at
+               )
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             self._job_to_row(job)
         )
         conn.commit()
@@ -90,31 +110,53 @@ class JobQueue:
 
     def dequeue(self, status: str = "PENDING") -> Optional[Job]:
         """
-        Retrieves and marks as 'DOWNLOADING' the next job with the specified status.
+        Retrieves the next job with the specified status from the queue that is ready for processing.
+        A job is ready if its status matches and its retry_at timestamp is in the past or None.
         """
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM jobs WHERE status = ? ORDER BY created_at ASC LIMIT 1", (status,))
+        now_iso = datetime.now().isoformat()
+        cursor.execute("SELECT * FROM jobs WHERE status = ? AND (retry_at IS NULL OR retry_at <= ?) ORDER BY created_at ASC LIMIT 1", (status, now_iso))
         row = cursor.fetchone()
         if row:
             job = self._row_to_job(row)
-            self.update_job_status(job.id, "DOWNLOADING")
-            job.status = "DOWNLOADING" # Update in memory object too
             logger.info(f"Dequeued job {job.id}: {job.track.title}")
             return job
         return None
-
-    def update_job_status(self, job_id: int, new_status: str, result_path: Optional[str] = None):
-        """Updates the status and optionally the result path of a job."""
+    
+    def update_job(self, job: Job):
+        """Updates an existing job's fields in the database."""
+        if job.id is None:
+            raise ValueError("Cannot update job without an ID.")
         conn = self._get_conn()
         cursor = conn.cursor()
-        now = datetime.now()
+        job.updated_at = datetime.now() # Always update timestamp
         cursor.execute(
-            """UPDATE jobs SET status = ?, updated_at = ?, result_path = ? WHERE id = ?""",
-            (new_status, now.isoformat(), result_path, job_id)
+            """UPDATE jobs SET track_json = ?, status = ?, attempts = ?, updated_at = ?, result_path = ?, transfer_id = ?, partial_path = ?, bytes_downloaded = ?, total_bytes = ?, retry_at = ? WHERE id = ?""",
+            (json.dumps(asdict(job.track)),
+             job.status,
+             job.attempts,
+             job.updated_at.isoformat(),
+             job.result_path,
+             job.transfer_id,
+             job.partial_path,
+             job.bytes_downloaded,
+             job.total_bytes,
+             job.retry_at.isoformat() if job.retry_at else None,
+             job.id)
         )
         conn.commit()
-        logger.debug(f"Updated job {job_id} status to {new_status}")
+        logger.debug(f"Updated job {job.id} status to {job.status}")
+
+    def find_by_transfer_id(self, transfer_id: str) -> Optional[Job]:
+        """Retrieves a job by its transfer_id."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM jobs WHERE transfer_id = ?", (transfer_id,))
+        row = cursor.fetchone()
+        if row:
+            return self._row_to_job(row)
+        return None
 
     def get_all_jobs(self) -> List[Job]:
         """Retrieves all jobs from the database."""

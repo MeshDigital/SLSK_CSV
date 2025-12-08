@@ -28,3 +28,8 @@ class Job:
     created_at: datetime
     updated_at: datetime
     result_path: Optional[str] # Path to the downloaded file
+    transfer_id: Optional[str] = None # aioslsk transfer ID for cancellation/resume
+    partial_path: Optional[str] = None # Path to the temporary .part file
+    bytes_downloaded: int = 0
+    total_bytes: Optional[int] = None
+    retry_at: Optional[datetime] = None # Timestamp for when to retry a failed job
