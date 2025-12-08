@@ -64,6 +64,7 @@ class AioSlskAdapter:
         self._event_listeners_registered = False
         self.event_queue = event_queue
         self._password: Optional[str] = None
+        self._search_future: Optional[asyncio.Future] = None
 
     async def connect(self, password: Optional[str] = None) -> None:
         """
@@ -134,18 +135,20 @@ class AioSlskAdapter:
             if prefers_settings:
                 logger.info("Building Settings-based SoulSeekClient (preferred for this aioslsk build)")
                 try:
+                    # Per API docs, Settings should only contain credentials.
                     creds = CredentialsSettings(username=self.config.username, password=self._password) # type: ignore
-                    settings_kwargs = {
-                        'credentials': creds,
+                    settings_obj = Settings(credentials=creds) # type: ignore
+
+                    # Pass listen_port and use_upnp to the client constructor directly.
+                    client_kwargs = {
                         'listen_port': self.config.listen_port,
                         'use_upnp': self.config.use_upnp
                     }
 
-                    settings_obj = Settings(**settings_kwargs) # type: ignore
                     try:
-                        self._client = SoulSeekClient(settings_obj) # type: ignore
+                        self._client = SoulSeekClient(settings_obj, **client_kwargs) # type: ignore
                     except TypeError:
-                        self._client = SoulSeekClient(settings=settings_obj) # type: ignore
+                        self._client = SoulSeekClient(settings=settings_obj, **client_kwargs) # type: ignore
 
                     # Register event listeners BEFORE connecting to ensure we catch connection events.
                     if not self._event_listeners_registered:
@@ -241,15 +244,26 @@ class AioSlskAdapter:
             self._client = None
             logger.info("Disconnected from Soulseek.")
 
-    async def search(self, query: str) -> List[Track]:
+    async def search(self, query: str, wait_for_results: bool = False) -> List[Track]:
         """
         Searches for tracks on Soulseek.
+
+        If `wait_for_results` is True, this method will wait for the search
+        results event and return the tracks directly. This is useful for workers.
+
+        If `wait_for_results` is False (default), it returns an empty list
+        immediately, and results are sent to the event_queue. This is for the GUI.
         """
         global SearchCommand
 
         if not self._client:
             raise ConnectionError("Not connected to Soulseek.")
         logger.info(f"Searching for: {query}")
+
+        if wait_for_results:
+            if self._search_future and not self._search_future.done():
+                raise RuntimeError("Another search operation is already waiting for results.")
+            self._search_future = asyncio.get_running_loop().create_future()
 
         # Adapt to the client object's capabilities, not just the config string.
         # Some "pypi" mode clients are instantiated with Settings and require commands.
@@ -259,8 +273,10 @@ class AioSlskAdapter:
             # be handled by the on_search_results event handler.
             logger.debug("Using high-level client.search() method. Results will be sent via event queue.")
             await self._client.search(query)
-            # The return is now mainly for non-GUI use cases. The GUI will use the event queue.
-            return []
+            if wait_for_results and self._search_future:
+                return await self._search_future
+            else:
+                return []
 
         elif hasattr(self._client, 'execute') and callable(getattr(self._client, 'execute')):
             logger.debug("Using command-based client.execute(SearchCommand(...)) method.")
@@ -273,7 +289,10 @@ class AioSlskAdapter:
             # For command-based search, we also rely on the SearchResultsEvent.
             # We execute the command but don't wait for a direct response here.
             await self._client.execute(SearchCommand(query)) # type: ignore
-            return [] # Results are handled by the event listener.
+            if wait_for_results and self._search_future:
+                return await self._search_future
+            else:
+                return []
         else:
             raise NotImplementedError("The connected aioslsk client has no recognized search method (.search or .execute).")
 
@@ -343,7 +362,12 @@ class AioSlskAdapter:
                       size=r.size, username=r.username, bitrate=r.bitrate, metadata={})
                 for r in event.results
             ]
-            self.event_queue.put(("search_results", tracks))
+            # If a future is waiting for these results, fulfill it.
+            if self._search_future and not self._search_future.done():
+                self._search_future.set_result(tracks)
+            # Otherwise, or in addition, send to the GUI queue.
+            if self.event_queue:
+                self.event_queue.put(("search_results", tracks))
 
         @self._client.on(TransferAddedEvent) # type: ignore
         async def on_transfer_added(event: TransferAddedEvent):

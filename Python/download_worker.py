@@ -120,7 +120,7 @@ class DownloadWorker:
                 # This job is from an automated source (e.g., CSV) and needs a search.
                 logger.info(f"Job {job.id} requires a search for '{job.track.title}'.")
                 search_query = f"{job.track.artist} {job.track.title}" if job.track.artist and job.track.title else job.track.filename
-                search_results = await self.adapter.search(search_query)
+                search_results = await self.adapter.search(search_query, wait_for_results=True)
                 if not search_results:
                     raise ValueError(f"No results found for query: '{search_query}'")
                 

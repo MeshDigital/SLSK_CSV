@@ -100,11 +100,16 @@ class SoulseekApp:
 
         # Remember password checkbox (controls whether plaintext fallback is used)
         self.remember_var = tk.BooleanVar(value=False)
-        self.remember_chk = ttk.Checkbutton(self.login_frame, text="Remember password", variable=self.remember_var)
-        self.remember_chk.grid(row=3, columnspan=2, pady=(0, 5))
+        self.remember_chk = ttk.Checkbutton(self.login_frame, text="Remember password", variable=self.remember_var, takefocus=0)
+        self.remember_chk.grid(row=3, column=0, sticky="w", padx=5)
+
+        # UPnP checkbox
+        self.upnp_var = tk.BooleanVar(value=self.config.use_upnp)
+        self.upnp_chk = ttk.Checkbutton(self.login_frame, text="Use UPnP", variable=self.upnp_var, takefocus=0)
+        self.upnp_chk.grid(row=3, column=1, sticky="w", padx=5)
 
         self.login_btn = ttk.Button(self.login_frame, text="Login", command=self.login)
-        self.login_btn.grid(row=4, columnspan=2, pady=10)
+        self.login_btn.grid(row=5, columnspan=2, pady=10)
 
         # Search Frame
         self.search_frame = tk.Frame(self.root)
@@ -263,6 +268,11 @@ class SoulseekApp:
             messagebox.showerror("Error", "Listen port must be a valid number.")
             return
 
+        # Update and save UPnP setting from the UI
+        if self.config.use_upnp != self.upnp_var.get():
+            self.config.use_upnp = self.upnp_var.get()
+            config.save_config(self.config)
+            logger.info(f"UPnP setting updated to {self.config.use_upnp} and saved.")
         # Save username and password (prefer keyring). Only allow plaintext
         # fallback to config when the user explicitly checks "Remember password".
         saved = config.save_credentials(
