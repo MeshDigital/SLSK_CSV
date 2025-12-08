@@ -100,18 +100,27 @@ class DownloadWorker:
         self.job_queue.update_job(job) # Persist updated attempts and status
         
         try:
-            # 1. Search for the track
-            # Construct a more robust search query
-            search_query = f"{job.track.artist} {job.track.title}" if job.track.artist and job.track.title else job.track.filename
-            search_results = await self.adapter.search(search_query)
-            if not search_results:
-                raise ValueError(f"No results found for {job.track.artist} - {job.track.title}")
-            
-            # For simplicity, pick the first result. In a real app, you'd have selection logic.
-            best_result = search_results[0] 
-            job.track.username = best_result.username
-            job.track.filename = best_result.filename # Update filename from search result
-            job.total_bytes = best_result.size # Update total_bytes from search result
+            # 1. Determine if we need to search or if we have a specific file from the user.
+            if job.track.username and job.track.filename:
+                # This job came from a user's selection in the GUI. Skip the search.
+                logger.info(f"Job {job.id} is for a specific file from user '{job.track.username}'. Skipping search.")
+                best_result = job.track
+                # Ensure total_bytes is set if it came from the search result
+                if job.track.size:
+                    job.total_bytes = job.track.size
+            else:
+                # This job is from an automated source (e.g., CSV) and needs a search.
+                logger.info(f"Job {job.id} requires a search for '{job.track.title}'.")
+                search_query = f"{job.track.artist} {job.track.title}" if job.track.artist and job.track.title else job.track.filename
+                search_results = await self.adapter.search(search_query)
+                if not search_results:
+                    raise ValueError(f"No results found for query: '{search_query}'")
+                
+                # For automation, pick the first result. A real app might have better selection logic (e.g., best bitrate).
+                best_result = search_results[0] 
+                job.track.username = best_result.username
+                job.track.filename = best_result.filename # Update filename from search result
+                job.total_bytes = best_result.size # Update total_bytes from search result
 
             # 2. Format filename and create download directory
             formatted_filename = namer.format_filename(job.track, self.config.filename_template)
