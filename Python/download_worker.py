@@ -37,6 +37,7 @@ class DownloadWorker:
         self._worker_task: Optional[asyncio.Task] = None
         self._last_progress_update_time: dict[int, float] = {} # {job_id: timestamp}
         self._progress_debounce_interval = 1 / 5 # 5 updates per second
+        self._job_events: dict[int, asyncio.Event] = {} # {job_id: completion_event}
 
     async def run(self):
         """
@@ -81,6 +82,13 @@ class DownloadWorker:
         # TODO: Implement actual cancellation of running tasks.
         # This would require keeping track of the asyncio.Task for each job.
         logger.warning(f"Cancellation for job {job_id} requested but not fully implemented yet.")
+
+    def signal_job_completion(self, job_id: int):
+        """Called from another coroutine to signal that a job's transfer has finished or failed."""
+        if job_id in self._job_events:
+            self._job_events[job_id].set()
+        else:
+            logger.warning(f"Attempted to signal completion for job {job_id}, but no event was found.")
 
     async def _process_job_wrapper(self, job: Job):
         """Wrapper to ensure semaphore is released after job processing and handle task cancellation."""
@@ -145,34 +153,29 @@ class DownloadWorker:
             self.job_queue.update_job(job)
             self.status_callback(job, "DOWNLOADING")
 
-            transfer_id, progress_iterator = await self.adapter.download(
+            transfer_id = await self.adapter.download(
                 best_result.username, best_result.filename, temp_file_path
             )
 
             if transfer_id:
                 job.transfer_id = transfer_id
                 self.job_queue.update_job(job) # Persist transfer_id
+                logger.info(f"Job {job.id} started download with transfer_id: {transfer_id}")
+            else:
+                raise IOError("Download could not be initiated by the adapter.")
 
-            async for progress_float in progress_iterator:
-                # Update bytes_downloaded based on progress_float and total_bytes
-                if job.total_bytes is not None:
-                    job.bytes_downloaded = int(progress_float * job.total_bytes)
-                
-                # Debounce progress updates to the callback
-                now = time.time()
-                if job.id not in self._last_progress_update_time or \
-                   (now - self._last_progress_update_time[job.id]) >= self._progress_debounce_interval:
-                    self.progress_callback(job, progress_float)
-                    self._last_progress_update_time[job.id] = now
-                
-                # Persist job state (including bytes_downloaded) periodically
-                self.job_queue.update_job(job)
-
-            # Ensure final progress update is sent
-            if job.id in self._last_progress_update_time:
-                del self._last_progress_update_time[job.id]
-            self.progress_callback(job, 1.0) # Always send 100% on completion
-
+            # Create and wait on an event that will be signaled by the GUI/event handler
+            # when the transfer is finished or failed.
+            completion_event = asyncio.Event()
+            self._job_events[job.id] = completion_event
+            try:
+                logger.info(f"Job {job.id} is now waiting for transfer completion signal.")
+                await completion_event.wait()
+                logger.info(f"Job {job.id} received completion signal.")
+            finally:
+                # Clean up the event
+                del self._job_events[job.id]
+            
             # 4. Atomically move file on completion
             if temp_file_path.exists():
                 os.replace(temp_file_path, final_output_path)

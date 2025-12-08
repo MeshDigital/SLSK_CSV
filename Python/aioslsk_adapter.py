@@ -11,7 +11,7 @@ import sys
 import inspect
 import traceback
 from collections.abc import Coroutine
-
+from queue import Queue
 # Conditional imports based on aioslsk mode. Try a few fallbacks and provide
 # a clearer error message if the expected class isn't found.
 try:
@@ -28,12 +28,14 @@ except Exception:
 try:
     # GitHub mode (command API) imports - these are NOT in PyPI 1.6.1
     from aioslsk.settings import Settings, CredentialsSettings
-    from aioslsk.commands import SearchCommand, DownloadFileCommand, CancelTransferCommand
-    from aioslsk.events import TransferProgressEvent, TransferAddedEvent, TransferRemovedEvent
+    from aioslsk.commands import SearchCommand, DownloadFileCommand, CancelTransferCommand, DownloadFolderCommand
+    from aioslsk.events import (TransferProgressEvent, TransferAddedEvent, TransferRemovedEvent,
+                                TransferFinishedEvent, TransferFailedEvent, ConnectionEstablishedEvent,
+                                ConnectionFailedEvent, SearchResultsEvent, SearchFailedEvent)
     GITHUB_MODE_AVAILABLE = True
 except ImportError:
     Settings = None # type: ignore
-    CredentialsSettings = None # type: ignore
+    CredentialsSettings = None  # type: ignore
     SearchCommand = None # type: ignore
     DownloadFileCommand = None # type: ignore
     CancelTransferCommand = None # type: ignore
@@ -41,6 +43,12 @@ except ImportError:
     TransferAddedEvent = None # type: ignore
     TransferRemovedEvent = None # type: ignore
     GITHUB_MODE_AVAILABLE = False
+    TransferFinishedEvent = None # type: ignore
+    TransferFailedEvent = None # type: ignore
+    ConnectionEstablishedEvent = None # type: ignore
+    ConnectionFailedEvent = None # type: ignore
+    SearchResultsEvent = None # type: ignore
+    SearchFailedEvent = None # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -48,15 +56,16 @@ class AioSlskAdapter:
     """
     Adapter for interacting with the aioslsk library, supporting different API modes.
     """
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, event_queue: Optional[Queue] = None):
         self.config = config
         self._client: Optional[SoulSeekClient] = None
         self._username = config.username
         self._download_progress_queues: dict[str, asyncio.Queue] = {}
         self._event_listeners_registered = False
+        self.event_queue = event_queue
         self._password: Optional[str] = None
 
-    async def connect(self) -> None:
+    async def connect(self, password: Optional[str] = None) -> None:
         """
         Connects to the Soulseek network.
         Retrieves password from keyring if available.
@@ -65,22 +74,19 @@ class AioSlskAdapter:
             logger.info("Already connected to Soulseek.")
             return
 
-        # Ensure we refer to module-level Settings/CredentialsSettings when
-        # attempting dynamic imports below. Without this `global` declaration
-        # assigning to `Settings` or `CredentialsSettings` would make them
-        # local to this function and cause UnboundLocalError when referenced
-        # earlier in the function.
-        global Settings, CredentialsSettings
 
         if not self.config.username:
             raise ValueError("Username not set in config.")
 
-        # Retrieve password via config helper (prefer keyring, fallback to config file)
-        try:
-            self._password = config.retrieve_password(self.config.username, config_file=config.DEFAULT_CONFIG_FILE)
-        except Exception as e:
-            logger.warning(f"Could not retrieve password for {self.config.username}: {e}")
-            self._password = None
+        # Use the provided password if available, otherwise retrieve it.
+        if password:
+            self._password = password
+        else:
+            try:
+                self._password = config.retrieve_password(self.config.username, config_file=config.DEFAULT_CONFIG_FILE)
+            except Exception as e:
+                logger.warning(f"Could not retrieve password for {self.config.username}: {e}")
+                self._password = None
 
         if not self._password:
             raise ValueError("Password not found in keyring or config. Please log in via GUI.")
@@ -129,7 +135,11 @@ class AioSlskAdapter:
                 logger.info("Building Settings-based SoulSeekClient (preferred for this aioslsk build)")
                 try:
                     creds = CredentialsSettings(username=self.config.username, password=self._password) # type: ignore
-                    settings_kwargs = {'credentials': creds}
+                    settings_kwargs = {
+                        'credentials': creds,
+                        'listen_port': self.config.listen_port,
+                        'use_upnp': self.config.use_upnp
+                    }
 
                     settings_obj = Settings(**settings_kwargs) # type: ignore
                     try:
@@ -137,12 +147,26 @@ class AioSlskAdapter:
                     except TypeError:
                         self._client = SoulSeekClient(settings=settings_obj) # type: ignore
 
+                    # Register event listeners BEFORE connecting to ensure we catch connection events.
+                    if not self._event_listeners_registered:
+                        self._register_event_listeners()
+
+                    # The correct sequence is to connect first, then log in.
+                    # Some versions use `start()` as the connection method.
                     if hasattr(self._client, 'start'):
                         start_fn = getattr(self._client, 'start')
                         if inspect.iscoroutinefunction(start_fn):
                             await start_fn()
                         else:
                             start_fn()
+                    elif hasattr(self._client, 'connect'):
+                        # Fallback to 'connect' if 'start' is not present
+                        connect_fn = getattr(self._client, 'connect')
+                        if inspect.iscoroutinefunction(connect_fn):
+                            await connect_fn()
+                        else:
+                            connect_fn()
+
                     if hasattr(self._client, 'login'):
                         login_fn = getattr(self._client, 'login')
                         if inspect.iscoroutinefunction(login_fn):
@@ -198,24 +222,13 @@ class AioSlskAdapter:
                             else:
                                 login_fn()
         elif self.config.aioslsk_mode == "github":
-            if not GITHUB_MODE_AVAILABLE:
-                raise NotImplementedError(
-                    "GitHub (command API) mode requires a specific aioslsk version "
-                    "not available on PyPI. Please install from GitHub master."
-                )
-            # Placeholder for GitHub mode connection
-            logger.info("Connecting to Soulseek in GitHub (command API) mode (placeholder)...")
-            settings = Settings(credentials=CredentialsSettings(username=self.config.username, password=self._password)) # type: ignore
-            self._client = SoulSeekClient(settings) # type: ignore
-            await self._client.start()
-            await self._client.login()
+            # This mode is now handled by the 'prefers_settings' logic in pypi mode.
+            # If a specific github-only flow is needed, it can be re-added,
+            # but the current logic is identical.
+            raise NotImplementedError("The 'github' aioslsk_mode is deprecated; the adapter now auto-detects API style.")
         else:
             raise ValueError(f"Unknown aioslsk_mode: {self.config.aioslsk_mode}")
         logger.info("Connected to Soulseek.")
-        # Register event listeners if in GitHub mode and not already done
-        if self.config.aioslsk_mode == "github" and not self._event_listeners_registered:
-            self._register_event_listeners()
-            self._event_listeners_registered = True
 
     async def disconnect(self) -> None:
         """Disconnects from the Soulseek network."""
@@ -241,14 +254,14 @@ class AioSlskAdapter:
         # Adapt to the client object's capabilities, not just the config string.
         # Some "pypi" mode clients are instantiated with Settings and require commands.
         if hasattr(self._client, 'search') and callable(getattr(self._client, 'search')):
-            logger.debug("Using high-level client.search() method.")
-            results = await self._client.search(query)
-            return [
-                Track(
-                    artist=r.artist, title=r.title, album=r.album, filename=r.filename,
-                    size=r.size, username=r.username, bitrate=r.bitrate, metadata={}
-                ) for r in results
-            ]
+            # The high-level search returns results directly, but we want to use the event-based
+            # system for consistency in the GUI. We'll still call it, but the results will
+            # be handled by the on_search_results event handler.
+            logger.debug("Using high-level client.search() method. Results will be sent via event queue.")
+            await self._client.search(query)
+            # The return is now mainly for non-GUI use cases. The GUI will use the event queue.
+            return []
+
         elif hasattr(self._client, 'execute') and callable(getattr(self._client, 'execute')):
             logger.debug("Using command-based client.execute(SearchCommand(...)) method.")
             if SearchCommand is None:
@@ -257,19 +270,14 @@ class AioSlskAdapter:
                     SearchCommand = getattr(commands_mod, 'SearchCommand', None)
                 except ImportError:
                     raise NotImplementedError("Client requires SearchCommand, but 'aioslsk.commands' could not be imported.")
-            response = await self._client.execute(SearchCommand(query), response=True) # type: ignore
-            if not response or not hasattr(response, 'results'):
-                return []
-            return [
-                Track(
-                    artist=r.artist, title=r.title, album=r.album, filename=r.filename,
-                    size=r.size, username=r.username, bitrate=r.bitrate, metadata={}
-                ) for r in response.results # type: ignore
-            ]
+            # For command-based search, we also rely on the SearchResultsEvent.
+            # We execute the command but don't wait for a direct response here.
+            await self._client.execute(SearchCommand(query)) # type: ignore
+            return [] # Results are handled by the event listener.
         else:
             raise NotImplementedError("The connected aioslsk client has no recognized search method (.search or .execute).")
 
-    async def download(self, username: str, filename: str, output_path: Path) -> tuple[Optional[str], AsyncIterator[float]]:
+    async def download(self, username: str, filename: str, output_path: Path) -> Optional[str]:
         """
         Downloads a file from Soulseek, yielding progress updates (0.0 to 1.0).
 
@@ -281,46 +289,24 @@ class AioSlskAdapter:
             raise ConnectionError("Not connected to Soulseek.")
         logger.info(f"Downloading '{filename}' from '{username}' to '{output_path}'")
 
-        # Create a temporary .part file for the download
-        tmp_dir = self.config.download_dir / "tmp"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        # The transfer_id will be the definitive name for the temp file
-        # but we don't have it yet. The worker will rename it.
-        temp_file_path = output_path.with_suffix(output_path.suffix + ".part")
-
-        if self.config.aioslsk_mode == "pypi":
-            # The high-level API does not expose a transfer_id before download starts.
-            # The async iterator is the source of progress.
-            # We must wrap the call to ensure the return type is consistent.
-            async def pypi_download_wrapper():
-                async for progress in self._client.download(username=username, filename=filename, output_file=temp_file_path):
-                    yield progress
-            return None, pypi_download_wrapper()
-
-        elif self.config.aioslsk_mode == "github":
-            # In GitHub mode, we execute a command and listen for events.
-            cmd = DownloadFileCommand(username=username, filename=filename, save_path=temp_file_path) # type: ignore
+        # Both PyPI and GitHub modes can use event-driven downloads.
+        # The `download` method on the client is now preferred as it triggers the events.
+        if hasattr(self._client, 'download') and callable(getattr(self._client, 'download')):
+            logger.debug("Using high-level client.download() method to initiate transfer.")
+            # This call initiates the download and returns a Transfer object.
+            # The progress and completion will be handled by the event listeners.
+            transfer = await self._client.download(username=username, filename=filename, output_file=output_path)
+            return transfer.id if transfer else None
+        elif hasattr(self._client, 'execute') and callable(getattr(self._client, 'execute')) and DownloadFileCommand:
+            logger.debug("Using command-based client.execute(DownloadFileCommand(...)) to initiate transfer.")
+            cmd = DownloadFileCommand(username=username, filename=filename, save_path=output_path) # type: ignore
             response = await self._client.execute(cmd, response=True) # type: ignore
-            transfer_id = response.id
-
-            # Create a queue to receive progress updates for this specific transfer
-            progress_queue = asyncio.Queue()
-            self._download_progress_queues[transfer_id] = progress_queue
-
-            async def progress_iterator():
-                try:
-                    while True:
-                        progress = await progress_queue.get()
-                        yield progress
-                        if progress >= 1.0:
-                            break
-                finally:
-                    # Clean up the queue when the download is done or cancelled
-                    del self._download_progress_queues[transfer_id]
-
-            return transfer_id, progress_iterator()
+            if response and hasattr(response, 'id'):
+                return response.id
+            return None
         else:
-            raise ValueError(f"Unknown aioslsk_mode: {self.config.aioslsk_mode}")
+            raise NotImplementedError("The connected aioslsk client has no recognized download method.")
+
 
     async def cancel_download(self, transfer_id: str) -> None:
         """
@@ -328,19 +314,51 @@ class AioSlskAdapter:
         """
         if not self._client:
             raise ConnectionError("Not connected to Soulseek.")
-        if self.config.aioslsk_mode == "github" and CancelTransferCommand:
+        if hasattr(self._client, 'execute') and callable(getattr(self._client, 'execute')) and CancelTransferCommand:
             logger.info(f"Cancelling download with transfer_id: {transfer_id}")
             await self._client.execute(CancelTransferCommand(id=transfer_id)) # type: ignore
         else:
-            logger.warning("Direct cancellation by transfer_id is not supported in PyPI mode. The worker must cancel the asyncio task.")
+            logger.warning("Direct cancellation by transfer_id is not supported by this aioslsk client.")
 
     def _register_event_listeners(self):
         """Register handlers for download-related events on the aioslsk event bus."""
-        if not self._client or not hasattr(self._client, 'on'):
+        if not self._client or not hasattr(self._client, 'on') or not self.event_queue:
+            logger.debug("Skipping event listener registration (no client, 'on' method, or event_queue).")
             return
+
+        logger.info("Registering aioslsk event listeners.")
+
+        @self._client.on(ConnectionEstablishedEvent) # type: ignore
+        async def on_connect(event: ConnectionEstablishedEvent):
+            self.event_queue.put(("connection_status", {"status": "connected", "username": event.username}))
+
+        @self._client.on(ConnectionFailedEvent) # type: ignore
+        async def on_connect_fail(event: ConnectionFailedEvent):
+            self.event_queue.put(("connection_status", {"status": "failed", "reason": str(event.exception)}))
+
+        @self._client.on(SearchResultsEvent) # type: ignore
+        async def on_search_results(event: SearchResultsEvent):
+            tracks = [
+                Track(artist=r.artist, title=r.title, album=r.album, filename=r.filename,
+                      size=r.size, username=r.username, bitrate=r.bitrate, metadata={})
+                for r in event.results
+            ]
+            self.event_queue.put(("search_results", tracks))
+
+        @self._client.on(TransferAddedEvent) # type: ignore
+        async def on_transfer_added(event: TransferAddedEvent):
+            self.event_queue.put(("transfer_added", event.transfer))
 
         @self._client.on(TransferProgressEvent) # type: ignore
         async def on_transfer_progress(event: TransferProgressEvent):
-            if event.id in self._download_progress_queues:
-                progress = event.transferred_bytes / event.total_bytes if event.total_bytes > 0 else 0.0
-                await self._download_progress_queues[event.id].put(progress)
+            self.event_queue.put(("transfer_progress", event.transfer))
+
+        @self._client.on(TransferFinishedEvent) # type: ignore
+        async def on_transfer_finished(event: TransferFinishedEvent):
+            self.event_queue.put(("transfer_finished", event.transfer))
+
+        @self._client.on(TransferFailedEvent) # type: ignore
+        async def on_transfer_failed(event: TransferFailedEvent):
+            self.event_queue.put(("transfer_failed", {"transfer": event.transfer, "error": event.error}))
+
+        self._event_listeners_registered = True

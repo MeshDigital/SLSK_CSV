@@ -13,6 +13,7 @@ import os
 # os.environ['TK_LIBRARY'] = r"C:\Program Files\Python313\tcl\tk8.6"
 import tkinter as tk
 from tkinter import ttk, messagebox
+import queue
 import keyring
 import logging
 from typing import Optional, List
@@ -42,7 +43,7 @@ class SoulseekApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Soulseek Downloader")
-        self.root.geometry("600x600")
+        self.root.geometry("800x700")
 
         # Load configuration
         self.config = config.load_config()
@@ -52,17 +53,19 @@ class SoulseekApp:
         self.job_queue: Optional[JobQueue] = None
         self.download_worker: Optional[DownloadWorker] = None
 
+        # Thread-safe queue for communication between asyncio loop and Tkinter
+        self.gui_queue = queue.Queue()
+
         # Create a dedicated asyncio loop in a background thread
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
 
         # To store the actual search result objects
         self.search_results = []
-        # To hold the current download task for cancellation
-        self.download_task = None
+        # To store transfer IDs for active downloads
+        self.active_downloads = {} # {transfer_id: listbox_item_id}
 
         self._setup_ui()
-
         # If a password exists in the keyring or config, prefill it and mark
         # the remember checkbox so the user knows credentials are stored.
         try:
@@ -74,6 +77,7 @@ class SoulseekApp:
             pass
 
         self._init_backend()
+        self.root.after(100, self.poll_gui_queue)
 
     def _setup_ui(self):
         # Login Frame
@@ -89,13 +93,18 @@ class SoulseekApp:
         self.password_entry = tk.Entry(self.login_frame, show="*", width=30)
         self.password_entry.grid(row=1, column=1, padx=5, pady=5)
 
+        tk.Label(self.login_frame, text="Listen Port").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        self.port_entry = tk.Entry(self.login_frame, width=30)
+        self.port_entry.grid(row=2, column=1, padx=5, pady=5)
+        self.port_entry.insert(0, str(self.config.listen_port))
+
         # Remember password checkbox (controls whether plaintext fallback is used)
         self.remember_var = tk.BooleanVar(value=False)
         self.remember_chk = ttk.Checkbutton(self.login_frame, text="Remember password", variable=self.remember_var)
-        self.remember_chk.grid(row=2, columnspan=2, pady=(0, 5))
+        self.remember_chk.grid(row=3, columnspan=2, pady=(0, 5))
 
         self.login_btn = ttk.Button(self.login_frame, text="Login", command=self.login)
-        self.login_btn.grid(row=3, columnspan=2, pady=10)
+        self.login_btn.grid(row=4, columnspan=2, pady=10)
 
         # Search Frame
         self.search_frame = tk.Frame(self.root)
@@ -112,38 +121,128 @@ class SoulseekApp:
         self.results_box.pack(pady=(0, 10))
         self.download_btn = ttk.Button(self.search_frame, text="Add to Download Queue", command=self.download_selected, state=tk.DISABLED)
         self.download_btn.pack(pady=(0, 5))
-        self.results_box.bind("<<ListboxSelect>>", self.on_result_select)
+        self.results_box.bind("<<ListboxSelect>>", lambda e: self.download_btn.config(state=tk.NORMAL))
 
-        # Progress
-        self.progress_label = tk.Label(self.search_frame, text="Download Progress:")
-        self.progress_label.pack(pady=(10, 0))
-        self.progress = ttk.Progressbar(self.search_frame, length=400, mode='determinate')
-        self.progress.pack(pady=(0, 10))
+        # Downloads Frame
+        self.downloads_frame = tk.Frame(self.root)
+        # self.downloads_frame.pack(pady=10) # Packed after login
 
-        # Cancel button
-        self.cancel_btn = ttk.Button(self.search_frame, text="Cancel Download", command=self.cancel_download, state=tk.DISABLED)
+        tk.Label(self.downloads_frame, text="Active Downloads").pack(pady=(10, 5))
+
+        # Using a Treeview for a structured download list
+        self.downloads_tree = ttk.Treeview(
+            self.downloads_frame,
+            columns=("filename", "user", "progress", "status"),
+            show="headings"
+        )
+        self.downloads_tree.heading("filename", text="Filename")
+        self.downloads_tree.heading("user", text="User")
+        self.downloads_tree.heading("progress", text="Progress")
+        self.downloads_tree.heading("status", text="Status")
+        self.downloads_tree.column("filename", width=300)
+        self.downloads_tree.column("user", width=100)
+        self.downloads_tree.column("progress", width=100, anchor="center")
+        self.downloads_tree.column("status", width=100, anchor="center")
+        self.downloads_tree.pack(pady=(0, 10), fill="both", expand=True)
+
+        self.cancel_btn = ttk.Button(self.downloads_frame, text="Cancel Selected Download", command=self.cancel_selected_download, state=tk.DISABLED)
         self.cancel_btn.pack(pady=(0, 10))
+        self.downloads_tree.bind("<<TreeviewSelect>>", lambda e: self.cancel_btn.config(state=tk.NORMAL))
+
+        # Status Bar
+        self.status_bar = tk.Label(self.root, text="Status: Disconnected", bd=1, relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
     def _init_backend(self):
-        self.adapter = AioSlskAdapter(self.config)
+        self.adapter = AioSlskAdapter(self.config, self.gui_queue)
         self.job_queue = JobQueue(self.config)
+        # The worker is now less critical for direct GUI feedback but still manages the job queue
         self.download_worker = DownloadWorker(
             adapter=self.adapter,
             job_queue=self.job_queue,
             config=self.config,
-            progress_callback=self._update_job_progress,
-            status_callback=self._update_job_status
+            progress_callback=lambda job, progress: None, # GUI is now event-driven
+            status_callback=lambda job, status: None, # GUI is now event-driven
         )
         self.run_async(self.download_worker.run())
 
-    def _update_job_progress(self, job: Job, progress: float):
-        """Callback to update GUI progress bar for a specific job."""
-        self.root.after(0, lambda: self.progress.config(value=progress * 100))
-        logger.debug(f"Job {job.id} progress: {progress:.2f}")
+    def poll_gui_queue(self):
+        """Poll the GUI queue for events from the backend and update the UI."""
+        try:
+            while True:
+                event_type, data = self.gui_queue.get_nowait()
+                if event_type == "connection_status":
+                    if data["status"] == "connected":
+                        self.status_bar.config(text=f"Status: Connected as {data['username']}")
+                        messagebox.showinfo("Success", f"Logged in as {data['username']}")
+                        self.login_frame.pack_forget()
+                        self.search_frame.pack(pady=10)
+                        self.downloads_frame.pack(pady=10, fill="both", expand=True)
+                    else:
+                        self.status_bar.config(text=f"Status: Connection Failed - {data['reason']}")
+                        messagebox.showerror("Login Failed", data['reason'])
+                elif event_type == "search_results":
+                    self._update_search_results_gui(data)
+                elif event_type == "transfer_added":
+                    self._handle_transfer_added(data)
+                elif event_type == "transfer_progress":
+                    self._handle_transfer_progress(data)
+                elif event_type == "transfer_finished" or event_type == "transfer_failed":
+                    self._handle_transfer_terminated(data, event_type)
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(100, self.poll_gui_queue)
 
-    def _update_job_status(self, job: Job, status_text: str):
-        """Callback to update GUI status for a specific job."""
-        logger.info(f"Job {job.id} status: {status_text}")
+    def _update_search_results_gui(self, results: List[Track]): # pragma: no cover
+        """Handles the 'search_results' event from the queue."""
+        self.search_results.extend(results)
+        for result in results:
+            display_text = f"{result.username or 'N/A'} - {result.filename} ({result.size or 'N/A'} bytes, {result.bitrate or 'N/A'} kbps)"
+            self.results_box.insert(tk.END, display_text)
+        self.status_bar.config(text=f"Status: Found {len(self.search_results)} results.")
+
+    def _handle_transfer_added(self, transfer):
+        """Add a new transfer to the downloads treeview."""
+        if transfer.id in self.active_downloads:
+            return
+        item_id = self.downloads_tree.insert(
+            "", "end", iid=transfer.id,
+            values=(transfer.filename, transfer.username, "0.00%", transfer.state.name)
+        )
+        self.active_downloads[transfer.id] = item_id
+
+    def _handle_transfer_progress(self, transfer):
+        """Update the progress of an existing transfer in the treeview."""
+        if transfer.id in self.active_downloads:
+            # Ensure progress is a float between 0 and 1
+            progress_val = getattr(transfer, 'progress', 0.0)
+            progress_str = f"{progress_val:.2%}"
+            self.downloads_tree.set(transfer.id, "progress", progress_str)
+            self.downloads_tree.set(transfer.id, "status", transfer.state.name)
+
+    def _handle_transfer_terminated(self, data, event_type):
+        """Update a transfer's status to FINISHED or FAILED."""
+        transfer = data if event_type == "transfer_finished" else data["transfer"]
+        error = data.get("error") if event_type == "transfer_failed" else None
+
+        if transfer.id in self.active_downloads:
+            if event_type == "transfer_finished":
+                self.downloads_tree.set(transfer.id, "progress", "100.00%")
+                self.downloads_tree.set(transfer.id, "status", "COMPLETED")
+            else:
+                self.downloads_tree.set(transfer.id, "status", f"FAILED: {error}")
+            # Optionally remove from active downloads dict after a delay or leave it
+            # For now, we leave it to show the final status.
+            # If you want to clean up, you could do:
+            # self.active_downloads.pop(transfer.id, None)
+            
+            # Find the job associated with this transfer and signal its completion to the worker
+            if self.job_queue and self.download_worker:
+                job = self.job_queue.find_by_transfer_id(transfer.id)
+                if job and job.id:
+                    logger.info(f"Signaling completion for job {job.id} associated with transfer {transfer.id}")
+                    self.download_worker.signal_job_completion(job.id)
 
     def login(self):
         username = self.username_entry.get()
@@ -151,6 +250,17 @@ class SoulseekApp:
 
         if not username or not password:
             messagebox.showerror("Error", "Please enter username and password")
+            return
+        
+        # Update and save listen port from the UI
+        try:
+            new_port = int(self.port_entry.get())
+            if self.config.listen_port != new_port:
+                self.config.listen_port = new_port
+                config.save_config(self.config)
+                logger.info(f"Listen port updated to {new_port} and saved.")
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "Listen port must be a valid number.")
             return
 
         # Save username and password (prefer keyring). Only allow plaintext
@@ -167,24 +277,13 @@ class SoulseekApp:
             messagebox.showwarning("Warning", "Password was not saved to keyring or config.")
         elif self.remember_var.get():
             messagebox.showinfo("Saved", "Password stored (keyring or config) as requested.")
-
-        # Async login
-        self.run_async(self.async_login(username, password))
+        
+        self.status_bar.config(text="Status: Connecting...")
+        self.run_async(self.adapter.connect(password=password))
 
     def run_async(self, coro):
         """Schedule an async task safely from Tkinter callbacks.""" # pragma: no cover
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
-
-    async def async_login(self, username, password): # pragma: no cover
-        try:
-            await self.adapter.connect()
-            def on_success():
-                messagebox.showinfo("Success", f"Logged in as {username}")
-                self.login_frame.pack_forget()
-                self.search_frame.pack(pady=10)
-            self.root.after(0, on_success)
-        except Exception as e:
-            self.root.after(0, lambda e=e: messagebox.showerror("Login Failed", str(e)))
 
     def search(self): # pragma: no cover
         query = self.search_entry.get()
@@ -193,24 +292,15 @@ class SoulseekApp:
             return
         self.run_async(self.async_search(query))
 
-    def _update_search_results_gui(self, results: List[Track]): # pragma: no cover
-        self.search_results.clear()
-        self.results_box.delete(0, tk.END)
-        self.search_results.extend(results)
-        for result in self.search_results:
-            display_text = f"{result.username or 'N/A'} - {result.filename} ({result.size or 'N/A'} bytes, {result.bitrate or 'N/A'} kbps)"
-            self.results_box.insert(tk.END, display_text)
-        self.download_btn.config(state=tk.DISABLED) # Disable until selection
-
     async def async_search(self, query): # pragma: no cover
-        # The adapter now manages its connection state internally.
-        # A check for self.adapter is still good practice.
         if not self.adapter:
             self.root.after(0, lambda: messagebox.showerror("Error", "Not connected to Soulseek. Please log in."))
             return
         try:
-            results = await self.adapter.search(query)
-            self.root.after(0, lambda: self._update_search_results_gui(results))
+            self.results_box.delete(0, tk.END)
+            self.search_results.clear()
+            self.status_bar.config(text=f"Status: Searching for '{query}'...")
+            await self.adapter.search(query) # Results will arrive via the queue
         except Exception as e:
             self.root.after(0, lambda e=e: messagebox.showerror("Search Error", str(e)))
 
@@ -231,19 +321,20 @@ class SoulseekApp:
         else:
             messagebox.showerror("Error", "Invalid selection. Please search again.")
 
-    def on_result_select(self, event): # pragma: no cover
-        self.download_btn.config(state=tk.NORMAL if self.results_box.curselection() else tk.DISABLED)
+    def cancel_selected_download(self): # pragma: no cover
+        """Cancel the download selected in the treeview."""
+        selected_items = self.downloads_tree.selection()
+        if not selected_items:
+            messagebox.showerror("Error", "Select a download to cancel.")
+            return
 
-    def cancel_download(self): # pragma: no cover
-        # This will cancel the currently active download task in the worker
-        if self.download_worker:
-            # A more robust implementation would cancel a specific job by its ID.
-            # For now, we can stop the current download if one is active.
-            # This is a conceptual change; DownloadWorker would need a `cancel_current_job` method.
-            # self.download_worker.cancel_current_job()
-            messagebox.showwarning("Cancellation", "Cancellation logic needs to be implemented in DownloadWorker.")
+        transfer_id = selected_items[0]
+        if self.adapter:
+            self.run_async(self.adapter.cancel_download(transfer_id))
+            self.downloads_tree.set(transfer_id, "status", "CANCELLING")
+            messagebox.showinfo("Cancellation", f"Sent cancellation request for {transfer_id}.")
         else:
-            messagebox.showinfo("Cancellation", "No active download to cancel.")
+            messagebox.showerror("Error", "Adapter not available to cancel download.")
 
     def on_closing(self): # pragma: no cover
         """Handle window closing event."""
@@ -259,7 +350,11 @@ class SoulseekApp:
         if messagebox.askokcancel("Quit", "Do you want to quit?"):
             # Disable the window to prevent user interaction during shutdown
             self.root.protocol("WM_DELETE_WINDOW", lambda: None) # Prevent closing again
-            self.run_async(shutdown()).add_done_callback(lambda _: self.root.destroy())
+            self.status_bar.config(text="Status: Shutting down...")
+            future = self.run_async(shutdown())
+            # Use add_done_callback to ensure the GUI is destroyed only after
+            # the async shutdown tasks are complete.
+            future.add_done_callback(lambda _: self.root.destroy())
 
 # Run GUI
 def main(): # pragma: no cover
