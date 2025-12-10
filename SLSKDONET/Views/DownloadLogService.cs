@@ -58,9 +58,17 @@ public class DownloadLogService
 
     private List<Track> LoadLog()
     {
-        if (!File.Exists(_logFilePath)) return new List<Track>();
-        var json = File.ReadAllText(_logFilePath);
-        return JsonSerializer.Deserialize<List<Track>>(json) ?? new List<Track>();
+        try
+        {
+            if (!File.Exists(_logFilePath)) return new List<Track>();
+            var json = File.ReadAllText(_logFilePath);
+            return JsonSerializer.Deserialize<List<Track>>(json) ?? new List<Track>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load download log from {LogFilePath}", _logFilePath);
+            return new List<Track>();
+        }
     }
 
     private void SaveLog()

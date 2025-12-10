@@ -157,13 +157,27 @@ public class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public void OnViewLoaded()
     {
-        LoadLibrary();
+        // Load library asynchronously to avoid blocking UI thread
+        Task.Run(() => LoadLibrary());
     }
 
     private void LoadLibrary()
     {
-        LibraryEntries.Clear();
-        _downloadLogService.GetEntries().ForEach(LibraryEntries.Add);
+        try
+        {
+            var entries = _downloadLogService.GetEntries();
+            // Update UI collection on the UI thread
+            System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+            {
+                LibraryEntries.Clear();
+                entries.ForEach(LibraryEntries.Add);
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load library entries");
+            StatusText = "Failed to load library";
+        }
     }
 
     public string Username
