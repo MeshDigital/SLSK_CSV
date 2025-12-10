@@ -47,4 +47,14 @@
     <PackageReference Include="WPF-UI" Version="4.1.0" />
   </ItemGroup>
 
+  <!-- Explicitly include XAML pages to ensure generated InitializeComponent and named elements are available. -->
+  <ItemGroup>
+    <Page Update="Views\MainWindow.xaml" />
+    <Page Update="Views\SearchPage.xaml" />
+    <Page Update="Views\ImportedPage.xaml" />
+    <Page Update="Views\DownloadsPage.xaml" />
+    <Page Update="Views\LibraryPage.xaml" />
+    <Page Update="Views\SettingsPage.xaml" />
+  </ItemGroup>
+
 </Project>

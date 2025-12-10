@@ -5,9 +5,12 @@
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
-                <ui:ThemesDictionary Theme="Dark" />
-                <ui:ControlsDictionary />
+                <!-- Use the application's local theme dictionary to provide brushes and styles -->
+                <ResourceDictionary Source="/SLSKDONET;component/Themes/ModernDarkTheme.xaml" />
             </ResourceDictionary.MergedDictionaries>
+            
+            <!-- Add BooleanToVisibilityConverter for login overlay binding -->
+            <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
         </ResourceDictionary>
     </Application.Resources>
 </Application>
