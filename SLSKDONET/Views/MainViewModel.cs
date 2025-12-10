@@ -420,7 +420,7 @@ public class MainViewModel : INotifyPropertyChanged
             SearchResults.Clear();
             var resultCount = 0;
 
-            var actualCount = await _soulseek.SearchAsync(normalizedQuery, formatFilter, (MinBitrate, MaxBitrate), track =>
+            var actualCount = await _soulseek.SearchAsync(normalizedQuery, formatFilter, (MinBitrate, MaxBitrate), DownloadMode.Normal, track =>
             {
                 // This callback is executed for each found track.
                 System.Windows.Application.Current.Dispatcher.Invoke(() =>
@@ -590,7 +590,7 @@ public class MainViewModel : INotifyPropertyChanged
             var totalFound = 0;
             await Parallel.ForEachAsync(ImportedQueries, new ParallelOptions { MaxDegreeOfParallelism = 4 }, async (query, ct) =>
             {
-                var resultCount = await _soulseek.SearchAsync(query.ToString(), formatFilter, (MinBitrate, MaxBitrate), track =>
+                var resultCount = await _soulseek.SearchAsync(query.ToString(), formatFilter, (MinBitrate, MaxBitrate), DownloadMode.Normal, track =>
                 {
                     // This callback is executed for each found track.
                     System.Windows.Application.Current.Dispatcher.Invoke(() => SearchResults.Add(track));

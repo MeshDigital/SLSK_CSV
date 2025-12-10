@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Windows.Controls;
+using SLSKDONET.Views;
 
 namespace SLSKDONET.Services;
 
@@ -36,8 +37,14 @@ public class NavigationService : INavigationService
     {
         if (_frame != null && _pages.TryGetValue(pageKey, out var pageType))
         {
-            var page = _serviceProvider.GetService(pageType);
-            _frame.Navigate(page);
+            var page = _serviceProvider.GetService(pageType) as Page;
+            if (page != null)
+            {
+                // Ensure the page's DataContext is the MainViewModel.
+                // This is crucial for bindings to work correctly.
+                page.DataContext = _serviceProvider.GetService(typeof(MainViewModel));
+                _frame.Navigate(page);
+            }
         }
     }
 }

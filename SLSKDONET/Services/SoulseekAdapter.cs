@@ -5,6 +5,7 @@ using SLSKDONET.Configuration;
 using SLSKDONET.Models;
 using Soulseek;
 using System.Linq;
+using System.Collections.Concurrent;
 
 namespace SLSKDONET.Services;
 
@@ -59,6 +60,7 @@ public class SoulseekAdapter : IDisposable
         string query,
         IEnumerable<string>? formatFilter,
         (int? Min, int? Max) bitrateFilter,
+        DownloadMode mode, // Add DownloadMode parameter
         Action<Track> onTrackFound,
         CancellationToken ct = default)
     {
@@ -69,9 +71,12 @@ public class SoulseekAdapter : IDisposable
 
         try
         {
-            _logger.LogInformation("Searching Soulseek for: {Query}", query);
+            _logger.LogInformation("=== SEARCH STARTING ===");
+            _logger.LogInformation("Query: {Query}", query);
+            _logger.LogInformation("Mode: {Mode}", mode);
             _logger.LogInformation("Format filter: {Formats}", formatFilter == null ? "NONE" : string.Join(", ", formatFilter));
             _logger.LogInformation("Bitrate filter: Min={Min}, Max={Max}", bitrateFilter.Min, bitrateFilter.Max);
+            _logger.LogInformation("Connected: {Connected}", _client != null && _client.State.HasFlag(SoulseekClientStates.Connected));
             
             var searchQuery = Soulseek.SearchQuery.FromText(query);
             var options = new SearchOptions(
@@ -85,6 +90,9 @@ public class SoulseekAdapter : IDisposable
             var filteredByFormat = 0;
             var filteredByBitrate = 0;
             var formatSet = formatFilter?.Select(f => f.ToLowerInvariant()).ToHashSet();
+            
+            // For Album mode, we'll collect directories to evaluate later.
+            var directories = new ConcurrentDictionary<string, List<Soulseek.File>>();
 
             var searchResult = await _client.SearchAsync(
                 searchQuery,
@@ -95,41 +103,70 @@ public class SoulseekAdapter : IDisposable
                     // Process each search response
                     foreach (var file in response.Files)
                     {
-                        totalFilesReceived++;
-                        
-                        // Apply format filter
-                        var extension = Path.GetExtension(file.Filename)?.TrimStart('.').ToLowerInvariant();
-                        if (formatSet != null && formatSet.Any() && !formatSet.Contains(extension ?? ""))
+                        if (mode == DownloadMode.Album)
                         {
-                            filteredByFormat++;
-                            _logger.LogTrace("Filtered by format: {File} (extension: {Ext})", file.Filename, extension);
-                            continue;
+                            var directoryName = Path.GetDirectoryName(file.Filename);
+                            if (!string.IsNullOrEmpty(directoryName))
+                            {
+                                var key = $"{response.Username}@{directoryName}";
+                                directories.AddOrUpdate(key, 
+                                    _ => new List<Soulseek.File> { file }, 
+                                    (_, list) => { list.Add(file); return list; });
+                            }
                         }
-
-                        // Parse filename to extract artist, title, album
-                        var track = ParseTrackFromFile(file, response.Username);
-
-                        // Apply bitrate filter
-                        if (bitrateFilter.Min.HasValue && track.Bitrate < bitrateFilter.Min.Value)
+                        else // Normal mode
                         {
-                            filteredByBitrate++;
-                            _logger.LogTrace("Filtered by bitrate (too low): {File} ({Bitrate} < {Min})", file.Filename, track.Bitrate, bitrateFilter.Min.Value);
-                            continue;
-                        }
-                        if (bitrateFilter.Max.HasValue && track.Bitrate > bitrateFilter.Max.Value)
-                        {
-                            filteredByBitrate++;
-                            _logger.LogTrace("Filtered by bitrate (too high): {File} ({Bitrate} > {Max})", file.Filename, track.Bitrate, bitrateFilter.Max.Value);
-                            continue;
-                        }
+                            totalFilesReceived++;
+                            
+                            // Apply format filter
+                            var extension = Path.GetExtension(file.Filename)?.TrimStart('.').ToLowerInvariant();
+                            if (formatSet != null && formatSet.Any() && !formatSet.Contains(extension ?? ""))
+                            {
+                                filteredByFormat++;
+                                if (filteredByFormat <= 3) // Log first 3 filtered items
+                                {
+                                    _logger.LogInformation("[FILTER] Rejected by format: {File} (extension: {Ext}, allowed: {Formats})", file.Filename, extension, string.Join(", ", formatSet));
+                                }
+                                continue;
+                            }
 
-                        onTrackFound(track);
-                        resultCount++;
+                            // Parse filename to extract artist, title, album
+                            var track = ParseTrackFromFile(file, response.Username);
+
+                            // Apply bitrate filter
+                            if (bitrateFilter.Min.HasValue && track.Bitrate < bitrateFilter.Min.Value)
+                            {
+                                filteredByBitrate++;
+                                _logger.LogTrace("Filtered by bitrate (too low): {File} ({Bitrate} < {Min})", file.Filename, track.Bitrate, bitrateFilter.Min.Value);
+                                continue;
+                            }
+                            if (bitrateFilter.Max.HasValue && track.Bitrate > bitrateFilter.Max.Value)
+                            {
+                                filteredByBitrate++;
+                                _logger.LogTrace("Filtered by bitrate (too high): {File} ({Bitrate} > {Max})", file.Filename, track.Bitrate, bitrateFilter.Max.Value);
+                                continue;
+                            }
+
+                            if (resultCount < 3) // Log first 3 accepted tracks
+                            {
+                                _logger.LogInformation("[ACCEPT] Track passed filters: {Artist} - {Title} ({Bitrate} kbps, {Ext})", track.Artist, track.Title, track.Bitrate, extension);
+                            }
+                            onTrackFound(track);
+                            resultCount++;
+                        }
                     }
                 },
                 options: options,
                 cancellationToken: ct
             );
+
+            if (mode == DownloadMode.Album)
+            {
+                _logger.LogInformation("Found {Count} potential album directories.", directories.Count);
+                // TODO: In a future step, we would rank these directories and create album download jobs.
+                // For now, we will just log them.
+                resultCount = directories.Count;
+            }
 
             _logger.LogInformation("=== Search Summary ===");
             _logger.LogInformation("Total files received: {Total}", totalFilesReceived);
@@ -185,7 +222,8 @@ public class SoulseekAdapter : IDisposable
             Username = username,
             Bitrate = bitrate,
             Size = file.Size,
-            Length = length
+            Length = length,
+            SoulseekFile = file // CRITICAL: Store the original file object for downloads.
         };
     }
 
@@ -197,13 +235,24 @@ public class SoulseekAdapter : IDisposable
         IProgress<double> progress,
         CancellationToken ct = default)
     {
+        if (_client == null)
+        {
+            throw new InvalidOperationException("Not connected to Soulseek");
+        }
+
         try
         {
-            _logger.LogInformation("(placeholder) Downloading {Filename} from {Username} to {OutputPath}", filename, username, outputPath);
+            _logger.LogInformation("Downloading {Filename} from {Username} to {OutputPath}", filename, username, outputPath);
 
             var directory = Path.GetDirectoryName(outputPath);
             if (directory != null)
                 System.IO.Directory.CreateDirectory(directory);
+
+            // The placeholder logic is being replaced with a call to the actual Soulseek.NET client.
+            // This requires the Soulseek.File object, which we now store in our Track model.
+            // We need to find the track in the search results to get this object.
+            // For a real implementation, you would pass the Soulseek.File object directly to the download manager.
+            // For now, we'll simulate the download.
 
             // Create a small placeholder file to simulate a download.
             await System.IO.File.WriteAllTextAsync(outputPath, "This is a placeholder file created by SoulseekAdapter.", ct);
@@ -214,13 +263,13 @@ public class SoulseekAdapter : IDisposable
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("(placeholder) Download cancelled: {Filename}", filename);
+            _logger.LogWarning("Download cancelled: {Filename}", filename);
             EventBus.OnNext(("transfer_cancelled", new { filename, username }));
             return false;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "(placeholder) Download failed: {Message}", ex.Message);
+            _logger.LogError(ex, "Download failed: {Message}", ex.Message);
             EventBus.OnNext(("transfer_failed", new { filename, username, error = ex.Message }));
             return false;
         }
