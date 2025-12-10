@@ -64,6 +64,7 @@ class SoulseekApp:
         self.search_results = []
         # To store transfer IDs for active downloads
         self.active_downloads = {} # {transfer_id: listbox_item_id}
+        self.current_search_token = 0
 
         self._setup_ui()
         # If a password exists in the keyring or config, prefill it and mark
@@ -121,12 +122,33 @@ class SoulseekApp:
         self.search_btn = ttk.Button(self.search_frame, text="Search", command=self.search)
         self.search_btn.pack(pady=(0, 10))
 
+        # Indeterminate progress bar for search feedback
+        self.search_progress = ttk.Progressbar(self.search_frame, mode='indeterminate')
+        # This will be packed/unpacked on demand, so no .pack() call here.
+
         # Results
-        self.results_box = tk.Listbox(self.search_frame, width=80, height=10)
-        self.results_box.pack(pady=(0, 10))
+        self.results_tree = ttk.Treeview(
+            self.search_frame,
+            columns=("filename", "artist", "album", "bitrate", "size", "user"),
+            show="headings",
+            height=10
+        )
+        self.results_tree.heading("filename", text="Filename", command=lambda: self._sort_treeview(self.results_tree, "filename", False))
+        self.results_tree.heading("artist", text="Artist", command=lambda: self._sort_treeview(self.results_tree, "artist", False))
+        self.results_tree.heading("album", text="Album", command=lambda: self._sort_treeview(self.results_tree, "album", False))
+        self.results_tree.heading("bitrate", text="Bitrate", command=lambda: self._sort_treeview(self.results_tree, "bitrate", True))
+        self.results_tree.heading("size", text="Size (MB)", command=lambda: self._sort_treeview(self.results_tree, "size", True))
+        self.results_tree.heading("user", text="User", command=lambda: self._sort_treeview(self.results_tree, "user", False))
+        self.results_tree.column("filename", width=250)
+        self.results_tree.column("artist", width=120)
+        self.results_tree.column("album", width=120)
+        self.results_tree.column("bitrate", width=60, anchor="center")
+        self.results_tree.column("size", width=70, anchor="e")
+        self.results_tree.column("user", width=100)
+        self.results_tree.pack(pady=(0, 10), fill="both", expand=True)
         self.download_btn = ttk.Button(self.search_frame, text="Add to Download Queue", command=self.download_selected, state=tk.DISABLED)
         self.download_btn.pack(pady=(0, 5))
-        self.results_box.bind("<<ListboxSelect>>", lambda e: self.download_btn.config(state=tk.NORMAL))
+        self.results_tree.bind("<<TreeviewSelect>>", lambda e: self.download_btn.config(state=tk.NORMAL if self.results_tree.selection() else tk.DISABLED))
 
         # Downloads Frame
         self.downloads_frame = tk.Frame(self.root)
@@ -159,7 +181,7 @@ class SoulseekApp:
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
     def _init_backend(self):
-        self.adapter = AioSlskAdapter(self.config, self.gui_queue)
+        self.adapter = AioSlskAdapter(self.config, event_queue=self.gui_queue)
         self.job_queue = JobQueue(self.config)
         # The worker is now less critical for direct GUI feedback but still manages the job queue
         self.download_worker = DownloadWorker(
@@ -199,13 +221,29 @@ class SoulseekApp:
         finally:
             self.root.after(100, self.poll_gui_queue)
 
-    def _update_search_results_gui(self, results: List[Track]): # pragma: no cover
+    def _update_search_results_gui(self, data: dict): # pragma: no cover
         """Handles the 'search_results' event from the queue."""
-        self.search_results.extend(results)
-        for result in results:
-            display_text = f"{result.username or 'N/A'} - {result.filename} ({result.size or 'N/A'} bytes, {result.bitrate or 'N/A'} kbps)"
-            self.results_box.insert(tk.END, display_text)
-        self.status_bar.config(text=f"Status: Found {len(self.search_results)} results.")
+        # Stop and hide the progress bar as soon as we process the result
+        self.search_progress.stop()
+        self.search_progress.pack_forget()
+
+        # The data is the list of tracks directly from the event
+        self.search_results = data
+        # Clear existing items
+        if self.search_results is not None:
+            for item in self.results_tree.get_children():
+                self.results_tree.delete(item)
+            # Insert new items
+            for i, track in enumerate(self.search_results):
+                size_mb = f"{(track.size or 0) / (1024*1024):.2f}" if track.size else "0.00"
+                self.results_tree.insert(
+                    "", "end", iid=i,
+                    values=(track.filename, track.artist or "", track.album or "",
+                            track.bitrate or 0, size_mb, track.username or "")
+                )
+        status_text = f"Status: Found {len(self.search_results)} results." if self.search_results else "Status: No results found."
+        self.status_bar.config(text=status_text)
+        self.search_btn.config(state=tk.NORMAL) # Re-enable search button
 
     def _handle_transfer_added(self, transfer):
         """Add a new transfer to the downloads treeview."""
@@ -241,13 +279,6 @@ class SoulseekApp:
             # For now, we leave it to show the final status.
             # If you want to clean up, you could do:
             # self.active_downloads.pop(transfer.id, None)
-            
-            # Find the job associated with this transfer and signal its completion to the worker
-            if self.job_queue and self.download_worker:
-                job = self.job_queue.find_by_transfer_id(transfer.id)
-                if job and job.id:
-                    logger.info(f"Signaling completion for job {job.id} associated with transfer {transfer.id}")
-                    self.download_worker.signal_job_completion(job.id)
 
     def login(self):
         username = self.username_entry.get()
@@ -288,12 +319,20 @@ class SoulseekApp:
         elif self.remember_var.get():
             messagebox.showinfo("Saved", "Password stored (keyring or config) as requested.")
         
-        self.status_bar.config(text="Status: Connecting...")
-        self.run_async(self.adapter.connect(password=password))
+        self.status_bar.config(text="Status: Connecting...")        
+        self.run_async(self.async_login(password))
 
     def run_async(self, coro):
         """Schedule an async task safely from Tkinter callbacks.""" # pragma: no cover
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+    async def async_login(self, password: str):
+        """Wrapper to handle the login process and catch exceptions."""
+        try:
+            await self.adapter.connect(password=password)
+        except Exception as e:
+            logger.error(f"Login process failed: {e}")
+            self.root.after(0, lambda e=e: messagebox.showerror("Login Failed", str(e)))
 
     def search(self): # pragma: no cover
         query = self.search_entry.get()
@@ -307,20 +346,37 @@ class SoulseekApp:
             self.root.after(0, lambda: messagebox.showerror("Error", "Not connected to Soulseek. Please log in."))
             return
         try:
-            self.results_box.delete(0, tk.END)
+            # Increment the token for this new search
+            self.current_search_token += 1
+            search_token = self.current_search_token
+
+            self.search_btn.config(state=tk.DISABLED) # Disable button during search
+            self.search_progress.pack(pady=(0, 10), fill=tk.X, padx=10) # Show progress bar
+            self.search_progress.start() # Start animation
             self.search_results.clear()
             self.status_bar.config(text=f"Status: Searching for '{query}'...")
-            await self.adapter.search(query) # Results will arrive via the queue
+            await self.adapter.search(query) # This is now non-blocking and sends results via the queue
         except Exception as e:
+            self.search_progress.stop()
+            self.search_progress.pack_forget()
+            logger.exception("An error occurred during search.")
             self.root.after(0, lambda e=e: messagebox.showerror("Search Error", str(e)))
+            self.search_btn.config(state=tk.NORMAL) # Re-enable on error
 
     def download_selected(self): # pragma: no cover
-        selection = self.results_box.curselection()
+        selection = self.results_tree.selection()
         if not selection:
             messagebox.showerror("Error", "Select a file to download")
             return
 
         selected_index = selection[0]
+        try:
+            # The iid of the treeview item is its index in the search_results list
+            selected_index = int(selected_index)
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "Invalid selection.")
+            return
+
         if 0 <= selected_index < len(self.search_results):
             track_to_download = self.search_results[selected_index]
             if self.job_queue:
@@ -345,6 +401,23 @@ class SoulseekApp:
             messagebox.showinfo("Cancellation", f"Sent cancellation request for {transfer_id}.")
         else:
             messagebox.showerror("Error", "Adapter not available to cancel download.")
+
+    def _sort_treeview(self, tree, col, reverse):
+        """Sort a treeview column when its heading is clicked."""
+        # Get data from treeview
+        data = [(tree.set(child, col), child) for child in tree.get_children('')]
+        
+        # Sort data. Handle numeric conversion for size and bitrate.
+        try:
+            data.sort(key=lambda t: float(t[0]), reverse=reverse)
+        except ValueError:
+            data.sort(key=lambda t: t[0].lower(), reverse=reverse)
+
+        for index, (val, child) in enumerate(data):
+            tree.move(child, '', index)
+
+        # Reverse sort direction for next click
+        tree.heading(col, command=lambda: self._sort_treeview(tree, col, not reverse))
 
     def on_closing(self): # pragma: no cover
         """Handle window closing event."""

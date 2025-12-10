@@ -37,7 +37,6 @@ class DownloadWorker:
         self._worker_task: Optional[asyncio.Task] = None
         self._last_progress_update_time: dict[int, float] = {} # {job_id: timestamp}
         self._progress_debounce_interval = 1 / 5 # 5 updates per second
-        self._job_events: dict[int, asyncio.Event] = {} # {job_id: completion_event}
 
     async def run(self):
         """
@@ -83,13 +82,6 @@ class DownloadWorker:
         # This would require keeping track of the asyncio.Task for each job.
         logger.warning(f"Cancellation for job {job_id} requested but not fully implemented yet.")
 
-    def signal_job_completion(self, job_id: int):
-        """Called from another coroutine to signal that a job's transfer has finished or failed."""
-        if job_id in self._job_events:
-            self._job_events[job_id].set()
-        else:
-            logger.warning(f"Attempted to signal completion for job {job_id}, but no event was found.")
-
     async def _process_job_wrapper(self, job: Job):
         """Wrapper to ensure semaphore is released after job processing and handle task cancellation."""
         try:
@@ -120,11 +112,11 @@ class DownloadWorker:
                 # This job is from an automated source (e.g., CSV) and needs a search.
                 logger.info(f"Job {job.id} requires a search for '{job.track.title}'.")
                 search_query = f"{job.track.artist} {job.track.title}" if job.track.artist and job.track.title else job.track.filename
-                search_results = await self.adapter.search(search_query, wait_for_results=True)
+                search_results = await self.adapter.search(search_query)
                 if not search_results:
                     raise ValueError(f"No results found for query: '{search_query}'")
                 
-                # For automation, pick the first result. A real app might have better selection logic (e.g., best bitrate).
+                # For automation, pick the first result. A real app might have better selection logic.
                 best_result = search_results[0] 
                 job.track.username = best_result.username
                 job.track.filename = best_result.filename # Update filename from search result
@@ -164,17 +156,21 @@ class DownloadWorker:
             else:
                 raise IOError("Download could not be initiated by the adapter.")
 
-            # Create and wait on an event that will be signaled by the GUI/event handler
-            # when the transfer is finished or failed.
-            completion_event = asyncio.Event()
-            self._job_events[job.id] = completion_event
-            try:
-                logger.info(f"Job {job.id} is now waiting for transfer completion signal.")
-                await completion_event.wait()
-                logger.info(f"Job {job.id} received completion signal.")
-            finally:
-                # Clean up the event
-                del self._job_events[job.id]
+            # Wait for the transfer to complete by periodically checking its status
+            # This removes the dependency on the GUI signaling completion.
+            while True:
+                transfer = self.adapter.get_transfer(transfer_id) # Assumes adapter can fetch transfer status
+                if not transfer:
+                    raise IOError(f"Transfer {transfer_id} disappeared.")
+                
+                if transfer.state.name == 'FINISHED':
+                    logger.info(f"Job {job.id} transfer finished.")
+                    break
+                elif transfer.state.name == 'FAILED':
+                    error_msg = getattr(transfer, 'error', 'Unknown error')
+                    raise IOError(f"Transfer failed: {error_msg}")
+                
+                await asyncio.sleep(1) # Check status every second
             
             # 4. Atomically move file on completion
             if temp_file_path.exists():
