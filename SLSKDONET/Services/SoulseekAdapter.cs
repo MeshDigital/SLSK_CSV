@@ -235,42 +235,62 @@ public class SoulseekAdapter : IDisposable
         IProgress<double> progress,
         CancellationToken ct = default)
     {
-        if (_client == null)
+        if (this._client == null)
         {
             throw new InvalidOperationException("Not connected to Soulseek");
         }
 
         try
         {
-            _logger.LogInformation("Downloading {Filename} from {Username} to {OutputPath}", filename, username, outputPath);
+            this._logger.LogInformation("Downloading {Filename} from {Username} to {OutputPath}", filename, username, outputPath);
 
             var directory = Path.GetDirectoryName(outputPath);
             if (directory != null)
                 System.IO.Directory.CreateDirectory(directory);
 
-            // The placeholder logic is being replaced with a call to the actual Soulseek.NET client.
-            // This requires the Soulseek.File object, which we now store in our Track model.
-            // We need to find the track in the search results to get this object.
-            // For a real implementation, you would pass the Soulseek.File object directly to the download manager.
-            // For now, we'll simulate the download.
+            // Use Soulseek.NET's DownloadAsync which returns byte array
+            // We need to track progress and write to file
+            using var fileStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, useAsync: true);
+            
+            var downloadOptions = new TransferOptions(
+                stateChanged: (args) =>
+                {
+                    if (args.Transfer.State.HasFlag(TransferStates.InProgress))
+                    {
+                        if (size.HasValue && size.Value > 0)
+                        {
+                            double percentage = (double)args.Transfer.BytesTransferred / size.Value;
+                            progress?.Report(percentage);
+                        }
+                    }
+                });
 
-            // Create a small placeholder file to simulate a download.
-            await System.IO.File.WriteAllTextAsync(outputPath, "This is a placeholder file created by SoulseekAdapter.", ct);
+            var data = await this._client.DownloadAsync(
+                username: username,
+                filename: filename,
+                size: size,
+                options: downloadOptions,
+                cancellationToken: ct);
 
+            // Write the downloaded data to file
+            await fileStream.WriteAsync(data, 0, data.Length, ct);
+            await fileStream.FlushAsync(ct);
+
+            this._logger.LogInformation("Download completed: {Filename}", filename);
             progress?.Report(1.0);
-            EventBus.OnNext(("transfer_finished", new { filename, username }));
+            this.EventBus.OnNext(("transfer_finished", new { filename, username }));
             return true;
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("Download cancelled: {Filename}", filename);
-            EventBus.OnNext(("transfer_cancelled", new { filename, username }));
+            this._logger.LogWarning("Download cancelled: {Filename}", filename);
+            this.EventBus.OnNext(("transfer_cancelled", new { filename, username }));
             return false;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Download failed: {Message}", ex.Message);
-            EventBus.OnNext(("transfer_failed", new { filename, username, error = ex.Message }));
+            this._logger.LogError(ex, "Download failed: {Message}", ex.Message);
+            this.EventBus.OnNext(("transfer_failed", new { filename, username, error = ex.Message }));
             return false;
         }
     }

@@ -99,16 +99,21 @@
         </Border>
 
         <!-- Results DataGrid -->
-        <DataGrid Grid.Row="2" Name="ResultsGrid" ItemsSource="{Binding SearchResults}"
-                  Style="{StaticResource ModernDataGridStyle}" Margin="0"
-                  AutoGenerateColumns="False" CanUserAddRows="False" SelectionMode="Extended"
+        <DataGrid Grid.Row="2" Name="ResultsGrid" 
+                  ItemsSource="{Binding SearchResults}"
+                  Style="{StaticResource ModernDataGridStyle}" 
+                  ColumnHeaderStyle="{StaticResource ModernColumnHeaderStyle}"
+                  CellStyle="{StaticResource ModernCellStyle}"
+                  RowStyle="{StaticResource ModernRowStyle}"
+                  Margin="0"
+                  IsReadOnly="True"
                   SelectionChanged="ResultsGrid_SelectionChanged">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Artist" Binding="{Binding Artist}" Width="150"/>
-                <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="*"/>
-                <DataGridTextColumn Header="Album" Binding="{Binding Album}" Width="120"/>
-                <DataGridTextColumn Header="Bitrate" Binding="{Binding Bitrate}" Width="70"/>
-                <DataGridTextColumn Header="User" Binding="{Binding Username}" Width="100"/>
+                <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="*" MinWidth="200"/>
+                <DataGridTextColumn Header="Album" Binding="{Binding Album}" Width="150"/>
+                <DataGridTextColumn Header="Bitrate" Binding="{Binding Bitrate, StringFormat={}{0} kbps}" Width="80"/>
+                <DataGridTextColumn Header="User" Binding="{Binding Username}" Width="120"/>
                 <DataGridTextColumn Header="Size" Binding="{Binding Size, StringFormat={}{0:N0} KB}" Width="100"/>
             </DataGrid.Columns>
         </DataGrid>
