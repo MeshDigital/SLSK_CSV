@@ -15,6 +15,7 @@ public class Track
     public string? Username { get; set; }
     public string? Format { get; set; }
     public int? Length { get; set; } // in seconds
+    public int Bitrate { get; set; } // in kbps
     public Dictionary<string, object>? Metadata { get; set; }
     public bool IsSelected { get; set; } = false;
     public Soulseek.File? SoulseekFile { get; set; }

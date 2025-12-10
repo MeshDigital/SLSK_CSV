@@ -29,8 +29,8 @@ public class MainViewModel : INotifyPropertyChanged
     private readonly SoulseekAdapter _soulseek;
     private readonly DownloadManager _downloadManager;
     private string _username = "";
-    private bool _isConnected;
-    private bool _isSearching;
+    private bool _isConnected = false;
+    private bool _isSearching = false;
     private string _statusText = "Disconnected";
     private string _downloadPath = "";
     private int _maxConcurrentDownloads = 2;
@@ -153,7 +153,7 @@ public class MainViewModel : INotifyPropertyChanged
             }
         };
         
-        _logger.LogInformation($"MainViewModel initialized. IsConnected={_isConnected}, StatusText={_statusText}");
+        _logger.LogInformation($"MainViewModel initialized. IsConnected={_isConnected}, IsSearching={_isSearching}, StatusText={_statusText}");
         _logger.LogInformation("=== MainViewModel Constructor Completed ===");
     }
 
@@ -198,7 +198,14 @@ public class MainViewModel : INotifyPropertyChanged
     public string SearchQuery
     {
         get => _searchQuery;
-        set { SetProperty(ref _searchQuery, value); }
+        set
+        {
+            if (SetProperty(ref _searchQuery, value))
+            {
+                // Notify SearchCommand to re-evaluate CanExecute
+                CommandManager.InvalidateRequerySuggested();
+            }
+        }
     }
 
     public bool IsConnected
@@ -209,6 +216,8 @@ public class MainViewModel : INotifyPropertyChanged
             if (SetProperty(ref _isConnected, value))
             {
                 OnPropertyChanged(nameof(IsLoginOverlayVisible));
+                // Notify commands that depend on IsConnected
+                CommandManager.InvalidateRequerySuggested();
             }
         }
     }
@@ -218,7 +227,15 @@ public class MainViewModel : INotifyPropertyChanged
     public bool IsSearching
     {
         get => _isSearching;
-        set { SetProperty(ref _isSearching, value); }
+        set
+        {
+            if (SetProperty(ref _isSearching, value))
+            {
+                _logger.LogInformation($"*** IsSearching changed to: {value} ***");
+                // Notify commands that depend on IsSearching
+                CommandManager.InvalidateRequerySuggested();
+            }
+        }
     }
 
     public string StatusText
@@ -361,42 +378,73 @@ public class MainViewModel : INotifyPropertyChanged
 
     private async Task SearchAsync()
     {
+        _logger.LogInformation("=== SearchAsync called ===");
+        _logger.LogInformation("SearchQuery: {Query}", SearchQuery);
+        _logger.LogInformation("IsConnected: {IsConnected}", IsConnected);
+        _logger.LogInformation("IsSearching: {IsSearching}", IsSearching);
+        
         if (string.IsNullOrEmpty(SearchQuery))
         {
             StatusText = "Enter a search query";
+            _logger.LogWarning("Search cancelled - empty query");
+            return;
+        }
+
+        if (!IsConnected)
+        {
+            StatusText = "Not connected to Soulseek";
+            _logger.LogWarning("Search cancelled - not connected");
             return;
         }
 
         IsSearching = true;
         StatusText = $"Searching for '{SearchQuery}'...";
+        _logger.LogInformation("Search started for: {Query}", SearchQuery);
 
         try
         {
-            var normalizedQuery = _searchQueryNormalizer.RemoveFeatArtists(SearchQuery); // Example usage
-            normalizedQuery = _searchQueryNormalizer.RemoveYoutubeMarkers(normalizedQuery); // Example usage
+            var normalizedQuery = _searchQueryNormalizer.RemoveFeatArtists(SearchQuery);
+            normalizedQuery = _searchQueryNormalizer.RemoveYoutubeMarkers(normalizedQuery);
+            _logger.LogInformation("Normalized query: {Query}", normalizedQuery);
 
             var formatFilter = PreferredFormats.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            _logger.LogInformation("Format filter: {Formats}", string.Join(", ", formatFilter));
+            _logger.LogInformation("Bitrate filter: Min={Min}, Max={Max}", MinBitrate, MaxBitrate);
 
             SearchResults.Clear();
+            var resultCount = 0;
 
-            var resultCount = await _soulseek.SearchAsync(normalizedQuery, formatFilter, (MinBitrate, MaxBitrate), track =>
+            var actualCount = await _soulseek.SearchAsync(normalizedQuery, formatFilter, (MinBitrate, MaxBitrate), track =>
             {
                 // This callback is executed for each found track.
-                // We need to add it to the collection on the UI thread.
-                System.Windows.Application.Current.Dispatcher.Invoke(() => SearchResults.Add(track));
-            }, _searchCts.Token); // Pass the token here
+                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                {
+                    SearchResults.Add(track);
+                    resultCount++;
+                    if (resultCount % 10 == 0) // Log every 10 results
+                    {
+                        _logger.LogInformation("Received {Count} results so far...", resultCount);
+                    }
+                });
+            }, _searchCts.Token);
             
-            StatusText = $"Found {resultCount} results";
-            _logger.LogInformation("Search completed with {Count} results", resultCount);
+            StatusText = $"Found {actualCount} results";
+            _logger.LogInformation("Search completed with {Count} results", actualCount);
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "Search cancelled";
+            _logger.LogWarning("Search was cancelled");
         }
         catch (Exception ex)
         {
             StatusText = $"Search failed: {ex.Message}";
-            _logger.LogError(ex, "Search failed");
+            _logger.LogError(ex, "Search failed: {Message}", ex.Message);
         }
         finally
         {
             IsSearching = false;
+            _logger.LogInformation("=== SearchAsync completed, IsSearching set to false ===");
         }
     }
 

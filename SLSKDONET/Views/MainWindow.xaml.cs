@@ -126,7 +126,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void SignInButton_Click(object sender, RoutedEventArgs e)
+    private void SignInButton_Click(object sender, RoutedEventArgs e)
     {
         try
         {

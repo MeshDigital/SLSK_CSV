@@ -19,8 +19,8 @@ public class AppConfig
     public bool CheckForDuplicates { get; set; } = true;
     
     // File preference conditions
-    public List<string> PreferredFormats { get; set; } = new() { "mp3" };
-    public int PreferredMinBitrate { get; set; } = 200; // kbps
+    public List<string> PreferredFormats { get; set; } = new() { "mp3", "flac" };
+    public int PreferredMinBitrate { get; set; } = 128; // kbps (more permissive default)
     public int PreferredMaxBitrate { get; set; } = 2500; // kbps
     public int PreferredMaxSampleRate { get; set; } = 48000; // Hz
     public int PreferredLengthTolerance { get; set; } = 3; // seconds
