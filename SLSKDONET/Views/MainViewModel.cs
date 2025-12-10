@@ -166,20 +166,26 @@ public class MainViewModel : INotifyPropertyChanged
     {
         _logger.LogInformation("OnViewLoaded called");
         // Load library asynchronously to avoid blocking UI thread
-        Task.Run(() => LoadLibrary());
+        _ = LoadLibraryAsync();
     }
 
-    private void LoadLibrary()
+    private async Task LoadLibraryAsync()
     {
         try
         {
-            var entries = _downloadLogService.GetEntries();
+            var entries = await Task.Run(() => _downloadLogService.GetEntries());
             // Update UI collection on the UI thread
-            System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+            if (System.Windows.Application.Current?.Dispatcher != null)
             {
-                LibraryEntries.Clear();
-                entries.ForEach(LibraryEntries.Add);
-            });
+                await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    LibraryEntries.Clear();
+                    foreach (var entry in entries)
+                    {
+                        LibraryEntries.Add(entry);
+                    }
+                });
+            }
         }
         catch (Exception ex)
         {

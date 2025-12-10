@@ -23,11 +23,14 @@
                        FontSize="{StaticResource FontSizeMedium}" FontWeight="Bold"/>
 
                 <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                    <TextBox Name="SearchBox" Text="{Binding SearchQuery, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                    <TextBox Name="SearchBox" 
+                             Text="{Binding SearchQuery, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                              Style="{StaticResource ModernTextBoxStyle}"
                              Width="400" Margin="0,0,8,0" VerticalAlignment="Center"
                              Height="36"
-                             Foreground="White"
+                             Background="#252526"
+                             Foreground="#FFFFFF"
+                             CaretBrush="#FFFFFF"
                              IsEnabled="{Binding IsSearching, Converter={StaticResource InverseBooleanConverter}}"/>
                     <Button Content="🔍 Search" 
                             Style="{StaticResource PrimaryButtonStyle}"

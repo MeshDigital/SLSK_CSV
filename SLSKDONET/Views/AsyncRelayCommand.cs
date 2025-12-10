@@ -41,6 +41,13 @@ public class AsyncRelayCommand<T> : ICommand
                 CommandManager.InvalidateRequerySuggested();
                 await _execute((T?)parameter);
             }
+            catch (Exception ex)
+            {
+                // Log the exception to prevent unobserved task exceptions
+                System.Diagnostics.Debug.WriteLine($"AsyncRelayCommand exception: {ex.Message}");
+                // Re-throw to let global handlers deal with it
+                throw;
+            }
             finally
             {
                 _isExecuting = false;
