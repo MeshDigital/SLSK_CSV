@@ -138,7 +138,7 @@ public partial class App : System.Windows.Application
         services.AddSingleton<SLSKDONET.Views.INotificationService, NotificationServiceAdapter>();
         services.AddSingleton<IUserInputService, UserInputService>();
 
-        // Views
+        // Views (add logger for MainWindow)
         services.AddSingleton<MainWindow>();
         services.AddSingleton<MainViewModel>(); // MainViewModel can be a singleton as it represents the app's main state.
 

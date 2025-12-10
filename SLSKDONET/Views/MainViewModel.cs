@@ -85,6 +85,8 @@ public class MainViewModel : INotifyPropertyChanged
         CsvInputSource csvInputSource) // Add CsvInputSource dependency
     {
         _logger = logger;
+        _logger.LogInformation("=== MainViewModel Constructor Started ===");
+        
         _config = config;
         _soulseek = soulseek;
         _downloadLogService = downloadLogService;
@@ -96,6 +98,8 @@ public class MainViewModel : INotifyPropertyChanged
         _protectedDataService = protectedDataService;
         _userInputService = userInputService;
         _searchQueryNormalizer = searchQueryNormalizer; // Store it
+        
+        _logger.LogInformation("Dependencies injected successfully");
 
         // Load initial settings
         Username = _config.Username ?? "";
@@ -148,6 +152,9 @@ public class MainViewModel : INotifyPropertyChanged
                 System.Windows.Application.Current.Dispatcher.Invoke(() => LibraryEntries.Add(job.Track));
             }
         };
+        
+        _logger.LogInformation($"MainViewModel initialized. IsConnected={_isConnected}, StatusText={_statusText}");
+        _logger.LogInformation("=== MainViewModel Constructor Completed ===");
     }
 
     // The field '_isLibraryLoaded' is assigned but its value is never used. It has been removed.
@@ -157,6 +164,7 @@ public class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public void OnViewLoaded()
     {
+        _logger.LogInformation("OnViewLoaded called");
         // Load library asynchronously to avoid blocking UI thread
         Task.Run(() => LoadLibrary());
     }
